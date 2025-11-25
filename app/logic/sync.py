@@ -1,0 +1,121 @@
+"""
+Calendar events sync logic
+Similar to calendar-integration-demo/v2-demo/worker/processors/recall-calendar-sync-events.js
+"""
+from datetime import datetime, timedelta
+from app.models import Calendar, CalendarEvent
+from app.services.recall.service import get_service
+import traceback
+
+
+def sync_calendar_events(calendar, last_updated_timestamp=None):
+    """
+    Sync calendar events from Recall API.
+    
+    Per Recall AI documentation:
+    - Fetch events via List Calendar Events endpoint
+    - Set updated_at__gte to last_updated_ts from webhook (if provided)
+    - Use is_deleted field to determine if event was removed
+    - Note: Recall doesn't delete events from their system, only marks as deleted
+    
+    Similar to recall-calendar-sync-events.js processor
+    """
+    recall_service = get_service()
+    
+    # If no timestamp provided, sync ALL events (no filter)
+    # This is useful for manual syncs or initial syncs
+    # For webhook-triggered syncs, timestamp will be provided
+    if not last_updated_timestamp:
+        last_updated_timestamp = None  # Sync all events
+    
+    if last_updated_timestamp:
+        print(f'INFO: Sync events for calendar {calendar.id}(recall_id: {calendar.recall_id}) since {last_updated_timestamp}')
+    else:
+        print(f'INFO: Sync ALL events for calendar {calendar.id}(recall_id: {calendar.recall_id})')
+    
+    try:
+        # Fetch events from Recall API (with pagination)
+        events = recall_service.fetch_calendar_events(
+            calendar_id=calendar.recall_id,
+            last_updated_timestamp=last_updated_timestamp
+        )
+        
+        print(f'INFO: Fetched {len(events) if events else 0} events from Recall API for calendar {calendar.id}')
+        
+        if not events:
+            print(f'INFO: No events found for calendar {calendar.id}')
+            return {
+                'success': True,
+                'upserted': 0,
+                'deleted': 0,
+                'total': 0
+            }
+        
+        events_upserted = []
+        events_deleted = []
+        
+        for event in events:
+            try:
+                if event.get('is_deleted'):
+                    # Event was deleted from calendar
+                    # Note: Recall doesn't delete events from their system, only marks as deleted
+                    # We delete from local database to keep it clean for UI display
+                    deleted_count = CalendarEvent.objects.filter(
+                        recall_id=event['id'],
+                        calendar_id=calendar.id
+                    ).delete()[0]
+                    if deleted_count > 0:
+                        events_deleted.append(event)
+                        print(f'INFO: Removed deleted event {event.get("id")} from local database for calendar {calendar.id}')
+                else:
+                    # Create or update event
+                    event_obj, created = CalendarEvent.objects.update_or_create(
+                        recall_id=event['id'],
+                        calendar_id=calendar.id,
+                        defaults={
+                            'platform': event.get('platform', calendar.platform),
+                            'recall_data': event,
+                            'should_record_automatic': False,  # Will be updated later
+                            'should_record_manual': None,
+                        }
+                    )
+                    events_upserted.append(event)
+                    action = 'Created' if created else 'Updated'
+                    print(f'INFO: {action} event {event.get("id")} ({event.get("title", "No title")}) for calendar {calendar.id}')
+            except Exception as e:
+                print(f'ERROR: Failed to process event {event.get("id", "unknown")}: {e}')
+                traceback.print_exc()
+                continue
+        
+        print(f'INFO: Synced (upsert: {len(events_upserted)}, delete: {len(events_deleted)}) calendar events for calendar({calendar.id})')
+        
+        # Close database connection to free up pool for Supabase Session Pooler
+        try:
+            from django.db import connections
+            connections['default'].close()
+        except:
+            pass
+        
+        return {
+            'success': True,
+            'upserted': len(events_upserted),
+            'deleted': len(events_deleted),
+            'total': len(events)
+        }
+    except Exception as e:
+        error_msg = str(e)
+        print(f'ERROR: Error syncing events for calendar {calendar.id}: {error_msg}')
+        traceback.print_exc()
+        
+        # Close connection even on error
+        try:
+            from django.db import connections
+            connections['default'].close()
+        except:
+            pass
+        
+        return {
+            'success': False,
+            'error': error_msg
+        }
+

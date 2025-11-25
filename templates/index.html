@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if user %}
+<p>Welcome, {{ user.name }}!</p>
+<a href="/sign-out" class="btn">Sign Out</a>
+{% endif %}
+
+<h2>Connect Calendar</h2>
+<div style="display: flex; gap: 20px;">
+    <div style="border: 1px solid #ddd; padding: 20px; border-radius: 4px;">
+        <h3>Google Calendar</h3>
+        <a href="{{ connectUrls.googleCalendar }}" class="btn">Connect</a>
+    </div>
+    <div style="border: 1px solid #ddd; padding: 20px; border-radius: 4px;">
+        <h3>Microsoft Outlook</h3>
+        <a href="{{ connectUrls.microsoftOutlook }}" class="btn">Connect</a>
+    </div>
+</div>
+
+<h2>Connected Calendars</h2>
+{% if calendars %}
+<table>
+    <tr>
+        <th>Platform</th>
+        <th>Email</th>
+        <th>Status</th>
+        <th>Actions</th>
+    </tr>
+    {% for calendar in calendars %}
+    <tr>
+        <td>{{ calendar.platform }}</td>
+        <td>{{ calendar.email|default:"N/A" }}</td>
+        <td>{{ calendar.status|default:"connecting" }}</td>
+        <td>
+            <a href="/calendar/{{ calendar.id }}" class="btn">View</a>
+            <form method="POST" action="/calendar/{{ calendar.id }}/delete" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete this calendar?');">
+                {% csrf_token %}
+                <input type="hidden" name="_method" value="DELETE" />
+                <button type="submit" class="btn btn-danger">Delete</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p>No calendars connected yet.</p>
+{% endif %}
+{% endblock %}
+
