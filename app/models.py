@@ -116,3 +116,54 @@ class CalendarWebhook(models.Model):
     class Meta:
         db_table = 'calendar_webhooks'
 
+
+class BotRecording(models.Model):
+    """Stores bot recording data and links to artifacts"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    bot_id = models.CharField(max_length=255, unique=True)  # Recall.ai bot ID
+    calendar_event_id = models.UUIDField(null=True, blank=True)  # Link to calendar event
+    recall_data = JSONField(default=dict)  # Full bot data from Recall.ai
+    status = models.CharField(max_length=50, default='pending')  # pending, processing, completed, failed
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'bot_recordings'
+    
+    @property
+    def recordings(self):
+        """Get recordings array from recall_data"""
+        return self.recall_data.get('recordings', [])
+
+
+class RecordingArtifact(models.Model):
+    """Stores downloaded artifacts (video, transcript, audio)"""
+    ARTIFACT_TYPES = [
+        ('video_mixed', 'Video Mixed'),
+        ('audio_mixed', 'Audio Mixed'),
+        ('transcript', 'Transcript'),
+        ('audio_separate', 'Audio Separate'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    bot_recording_id = models.UUIDField()  # Foreign key to BotRecording
+    recording_id = models.CharField(max_length=255)  # Recall.ai recording ID
+    artifact_type = models.CharField(max_length=50, choices=ARTIFACT_TYPES)
+    
+    # File storage
+    file_path = models.CharField(max_length=500, null=True, blank=True)  # Local file path
+    file_size = models.BigIntegerField(null=True, blank=True)  # File size in bytes
+    file_format = models.CharField(max_length=50, null=True, blank=True)  # mp4, json, mp3, etc.
+    
+    # Metadata
+    download_url = models.URLField(null=True, blank=True)  # Original download URL (short-lived)
+    metadata = JSONField(default=dict)  # Additional metadata
+    
+    downloaded_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'recording_artifacts'
+        unique_together = [['bot_recording_id', 'recording_id', 'artifact_type']]

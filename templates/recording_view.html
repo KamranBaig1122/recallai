@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+
+{% block title %}Recording - {{ recording.bot_id }}{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Meeting Recording</h1>
+    
+    {% if calendar_event %}
+    <div class="mb-3">
+        <h3>{{ calendar_event.title }}</h3>
+        <p class="text-muted">
+            <strong>Date:</strong> 
+            {% if calendar_event.start_time %}{{ calendar_event.start_time|date:"F d, Y g:i A" }}{% endif %}
+            {% if calendar_event.end_time %} - {{ calendar_event.end_time|date:"g:i A" }}{% endif %}
+        </p>
+    </div>
+    {% endif %}
+    
+    <div class="row">
+        <!-- Video Player -->
+        <div class="col-lg-8 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Video Recording</h5>
+                </div>
+                <div class="card-body p-0">
+                    {% if video_artifact %}
+                        <video 
+                            id="recording-video" 
+                            controls 
+                            width="100%" 
+                            style="max-height: 600px;"
+                            preload="metadata">
+                            <source src="{% url 'serve-video' recording.id %}" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    {% else %}
+                        <div class="p-4 text-center text-muted">
+                            <p>Video not available yet. It may still be processing.</p>
+                            <p><small>Status: {{ recording.status }}</small></p>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Transcript Panel -->
+        <div class="col-lg-4 mb-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Transcript</h5>
+                </div>
+                <div class="card-body" style="max-height: 600px; overflow-y: auto;">
+                    {% if transcript_data %}
+                        <div id="transcript-content">
+                            {% if transcript_data.words %}
+                                <!-- Format: Array of word objects with timestamps -->
+                                <div class="transcript-words">
+                                    {% for word in transcript_data.words %}
+                                        <span 
+                                            class="transcript-word" 
+                                            data-start="{{ word.start|default:0 }}"
+                                            data-end="{{ word.end|default:0 }}"
+                                            style="cursor: pointer;"
+                                            onclick="seekToTime({{ word.start|default:0 }})">
+                                            {{ word.text|default:word.word|default:"" }}
+                                        </span>
+                                    {% endfor %}
+                                </div>
+                            {% elif transcript_data.text %}
+                                <!-- Format: Plain text -->
+                                <p>{{ transcript_data.text }}</p>
+                            {% elif transcript_data.transcript %}
+                                <!-- Format: Nested transcript object -->
+                                {% if transcript_data.transcript.words %}
+                                    {% for word in transcript_data.transcript.words %}
+                                        <span 
+                                            class="transcript-word" 
+                                            data-start="{{ word.start|default:0 }}"
+                                            data-end="{{ word.end|default:0 }}"
+                                            style="cursor: pointer;"
+                                            onclick="seekToTime({{ word.start|default:0 }})">
+                                            {{ word.text|default:word.word|default:"" }}
+                                        </span>
+                                    {% endfor %}
+                                {% else %}
+                                    <p>{{ transcript_data.transcript.text|default:transcript_data.transcript }}</p>
+                                {% endif %}
+                            {% else %}
+                                <!-- Fallback: Display raw JSON -->
+                                <pre style="font-size: 0.9em;">{{ transcript_data|safe }}</pre>
+                            {% endif %}
+                        </div>
+                    {% elif transcript_artifact %}
+                        <p class="text-muted">Transcript file exists but could not be loaded.</p>
+                        <a href="{% url 'serve-transcript' recording.id %}" class="btn btn-sm btn-outline-primary" download>
+                            Download Transcript (JSON)
+                        </a>
+                    {% else %}
+                        <p class="text-muted">Transcript not available yet. It may still be processing.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Artifacts Info -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5>Recording Information</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p><strong>Bot ID:</strong> {{ recording.bot_id }}</p>
+                            <p><strong>Status:</strong> <span class="badge badge-{{ recording.status|lower }}">{{ recording.status }}</span></p>
+                            <p><strong>Created:</strong> {{ recording.created_at|date:"F d, Y g:i A" }}</p>
+                        </div>
+                        <div class="col-md-6">
+                            {% if video_artifact %}
+                                <p><strong>Video:</strong> 
+                                    <a href="{% url 'serve-video' recording.id %}" download>
+                                        Download ({% if video_artifact.file_size %}{{ video_artifact.file_size|floatformat:0 }} bytes{% else %}Available{% endif %})
+                                    </a>
+                                </p>
+                            {% endif %}
+                            {% if audio_artifact %}
+                                <p><strong>Audio:</strong> Available{% if audio_artifact.file_size %} ({{ audio_artifact.file_size|floatformat:0 }} bytes){% endif %}</p>
+                            {% endif %}
+                            {% if transcript_artifact %}
+                                <p><strong>Transcript:</strong> 
+                                    <a href="{% url 'serve-transcript' recording.id %}" download>
+                                        Download{% if transcript_artifact.file_size %} ({{ transcript_artifact.file_size|floatformat:0 }} bytes){% endif %}
+                                    </a>
+                                </p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Sync transcript with video playback
+const video = document.getElementById('recording-video');
+const transcriptWords = document.querySelectorAll('.transcript-word');
+
+if (video && transcriptWords.length > 0) {
+    // Highlight current word based on video time
+    video.addEventListener('timeupdate', function() {
+        const currentTime = video.currentTime;
+        
+        transcriptWords.forEach(word => {
+            const start = parseFloat(word.getAttribute('data-start')) || 0;
+            const end = parseFloat(word.getAttribute('data-end')) || start + 1;
+            
+            if (currentTime >= start && currentTime < end) {
+                word.style.backgroundColor = '#ffeb3b';
+                word.style.fontWeight = 'bold';
+                // Scroll to word
+                word.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } else {
+                word.style.backgroundColor = '';
+                word.style.fontWeight = '';
+            }
+        });
+    });
+}
+
+function seekToTime(time) {
+    if (video) {
+        video.currentTime = time;
+        video.play();
+    }
+}
+</script>
+
+<style>
+.transcript-word {
+    margin-right: 0.3em;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: background-color 0.2s;
+}
+
+.transcript-word:hover {
+    background-color: #e3f2fd;
+}
+
+.badge-pending {
+    background-color: #ff9800;
+    color: white;
+}
+
+.badge-processing {
+    background-color: #2196f3;
+    color: white;
+}
+
+.badge-completed {
+    background-color: #4caf50;
+    color: white;
+}
+
+.badge-failed {
+    background-color: #f44336;
+    color: white;
+}
+</style>
+{% endblock %}
+

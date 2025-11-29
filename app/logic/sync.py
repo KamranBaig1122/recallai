@@ -82,6 +82,33 @@ def sync_calendar_events(calendar, last_updated_timestamp=None):
                     events_upserted.append(event)
                     action = 'Created' if created else 'Updated'
                     print(f'INFO: {action} event {event.get("id")} ({event.get("title", "No title")}) for calendar {calendar.id}')
+                    
+                    # Automatically create bot for events with meeting URLs
+                    if event_obj.meeting_url and event_obj.start_time:
+                        from django.utils import timezone
+                        from app.logic.bot_creator import create_bot_for_event
+                        
+                        # Only create bot if event is in the future
+                        start_time = event_obj.start_time
+                        if timezone.is_naive(start_time):
+                            start_time = timezone.make_aware(start_time)
+                        
+                        if start_time > timezone.now():
+                            # Check if bot already exists
+                            bots = event_obj.bots
+                            if not bots or len(bots) == 0:
+                                try:
+                                    result = create_bot_for_event(event_obj)
+                                    if result['success']:
+                                        print(f'INFO: ✓ Created bot {result["bot_id"]} for event {event_obj.id} (will join at {result["join_at"]})')
+                                    else:
+                                        print(f'WARNING: Failed to create bot for event {event_obj.id}: {result.get("error")}')
+                                except Exception as bot_error:
+                                    print(f'WARNING: Error creating bot for event {event_obj.id}: {bot_error}')
+                            else:
+                                print(f'INFO: Event {event_obj.id} already has {len(bots)} bot(s), skipping bot creation')
+                        else:
+                            print(f'INFO: Event {event_obj.id} start time is in the past, skipping bot creation')
             except Exception as e:
                 print(f'ERROR: Failed to process event {event.get("id", "unknown")}: {e}')
                 traceback.print_exc()

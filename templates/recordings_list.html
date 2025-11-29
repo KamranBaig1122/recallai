@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+
+{% block title %}Recordings{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Meeting Recordings</h1>
+    
+    <div class="mb-3">
+        <p>Total recordings: <strong>{{ total_count }}</strong></p>
+        <a href="{% url 'list-recordings' %}" class="btn">All Recordings</a>
+        <a href="{% url 'list-recordings' %}?status=completed" class="btn">Completed</a>
+        <a href="{% url 'list-recordings' %}?status=processing" class="btn">Processing</a>
+        <a href="{% url 'list-recordings' %}?status=pending" class="btn">Pending</a>
+    </div>
+    
+    {% if recordings %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Bot ID</th>
+                <th>Event</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Artifacts</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for recording in recordings %}
+            <tr>
+                <td>
+                    <code>{{ recording.bot_id|truncatechars:20 }}</code>
+                </td>
+                <td>
+                    {% if recording.calendar_event_id %}
+                        {% for event_id, event in events.items %}
+                            {% if event_id == recording.calendar_event_id|stringformat:"s" %}
+                                <strong>{{ event.title }}</strong><br>
+                                <small class="text-muted">
+                                    {% if event.start_time %}{{ event.start_time|date:"M d, Y g:i A" }}{% endif %}
+                                </small>
+                            {% endif %}
+                        {% endfor %}
+                        {% if not events %}
+                            <span class="text-muted">Event not found</span>
+                        {% endif %}
+                    {% else %}
+                        <span class="text-muted">No event linked</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <span class="badge badge-{{ recording.status|lower }}">
+                        {{ recording.status }}
+                    </span>
+                </td>
+                <td>
+                    {{ recording.created_at|date:"M d, Y g:i A" }}
+                </td>
+                <td>
+                    {% if recording.recordings %}
+                        <span class="badge badge-success">{{ recording.recordings|length }} recording(s)</span>
+                    {% else %}
+                        <span class="text-muted">No recordings yet</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="{% url 'view-recording' recording.id %}" class="btn btn-sm">View</a>
+                    <a href="{% url 'retrieve-bot' recording.bot_id %}" class="btn btn-sm" target="_blank">Retrieve</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="notice">
+        <p>No recordings found.</p>
+    </div>
+    {% endif %}
+</div>
+
+<style>
+.badge {
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.85em;
+}
+
+.badge-pending {
+    background-color: #ff9800;
+    color: white;
+}
+
+.badge-processing {
+    background-color: #2196f3;
+    color: white;
+}
+
+.badge-completed {
+    background-color: #4caf50;
+    color: white;
+}
+
+.badge-failed {
+    background-color: #f44336;
+    color: white;
+}
+
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+}
+
+.table th, .table td {
+    padding: 12px;
+    text-align: left;
+    border-bottom: 1px solid #ddd;
+}
+
+.table th {
+    background-color: #f8f9fa;
+    font-weight: bold;
+}
+
+.btn-sm {
+    padding: 4px 8px;
+    font-size: 0.85em;
+    margin-right: 5px;
+}
+</style>
+{% endblock %}
+

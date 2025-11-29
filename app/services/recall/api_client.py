@@ -6,7 +6,11 @@ from urllib.parse import urlencode
 class RecallApiClient:
     def __init__(self, api_key=None, api_host=None):
         self.api_key = api_key or settings.RECALL_API_KEY
-        self.api_host = api_host or settings.RECALL_API_HOST
+        # If api_host is provided, use it; otherwise use settings or default
+        if api_host:
+            self.api_host = api_host
+        else:
+            self.api_host = settings.RECALL_API_HOST
     
     def build_url(self, path, query_params=None):
         url = f"{self.api_host}{path}"

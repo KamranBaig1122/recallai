@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'channels',  # Django Channels for WebSocket support
     'app',
 ]
 
@@ -159,6 +160,18 @@ STATICFILES_DIRS = [BASE_DIR / 'static'] if (BASE_DIR / 'static').exists() else 
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Django Channels configuration
+ASGI_APPLICATION = 'recallai.asgi.application'
+
+# Channels layer configuration (for WebSocket support)
+# Using in-memory channel layer for development
+# For production, use Redis: CHANNEL_LAYERS = {...}
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer'
+    },
+}
 
 # Custom settings (PUBLIC_URL already defined above for CSRF settings)
 PORT = int(os.getenv('PORT', '3003'))
