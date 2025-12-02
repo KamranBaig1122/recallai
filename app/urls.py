@@ -1,5 +1,5 @@
 from django.urls import path
-from app.views import root, auth, oauth, calendar, calendar_event, webhooks
+from app.views import root, auth, oauth, calendar, calendar_event, webhooks, calendar_api
 import app.views.bot_webhooks as bot_webhooks
 from app.views import static_files, bot_recordings, recordings_list
 
@@ -17,6 +17,15 @@ urlpatterns = [
     path('calendar/<uuid:calendar_id>/sync', calendar.calendar_sync, name='calendar-sync'),
     path('calendar/<uuid:calendar_id>/update', calendar.calendar_update, name='calendar-update'),
     path('calendar/<uuid:calendar_id>/delete', calendar.calendar_delete, name='calendar-delete'),
+    
+    # Calendar API endpoints (for frontend) - simple like root_view
+    path('api/calendars', calendar_api.api_list_calendars, name='api-list-calendars'),
+    path('api/calendar/connect-urls', calendar_api.api_get_connect_urls, name='api-get-connect-urls'),
+    path('api/calendar/<uuid:calendar_id>', calendar_api.api_get_calendar, name='api-get-calendar'),
+    path('api/calendar/<uuid:calendar_id>/update', calendar_api.api_update_calendar, name='api-update-calendar'),
+    path('api/calendar/<uuid:calendar_id>/sync', calendar_api.api_sync_calendar, name='api-sync-calendar'),
+    path('api/calendar/<uuid:calendar_id>/delete', calendar_api.api_delete_calendar, name='api-delete-calendar'),
+    path('api/calendar-event/<uuid:event_id>/set-manual-record', calendar_api.api_set_manual_record, name='api-set-manual-record'),
     
     # Calendar Event
     path('calendar-event/<uuid:event_id>/set-manual-record', calendar_event.set_manual_record, name='calendar-event-set-manual-record'),
