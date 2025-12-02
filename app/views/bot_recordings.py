@@ -7,7 +7,10 @@ from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import get_object_or_404
 from app.models import BotRecording, RecordingArtifact, CalendarEvent
 from app.services.recall.service import get_service
-from app.services.recall.artifact_downloader import download_and_save_artifacts, extract_media_shortcuts
+from app.services.assemblyai.transcript_fetcher import (
+    get_assemblyai_transcript,
+    extract_assemblyai_transcript_id
+)
 from pathlib import Path
 
 
@@ -16,26 +19,50 @@ def retrieve_bot(request, bot_id: str):
     """
     Retrieve bot data from Recall.ai and save to database
     Similar to meeting-bot /retrieve/{bot_id} endpoint
+    
+    GET /retrieve/<bot_id>
+    Returns bot data with download URLs (no file downloading)
     """
+    if request.method != 'GET':
+        return JsonResponse({
+            'ok': False,
+            'error': 'Method not allowed. Use GET.'
+        }, status=405)
+    
     try:
+        print(f'INFO: Retrieving bot {bot_id}...')
+        
         # Get bot data from Recall.ai
         recall_service = get_service()
         bot_json = recall_service.get_bot(bot_id)
         
         if not bot_json:
+            print(f'WARNING: Bot {bot_id} not found in Recall.ai')
             return JsonResponse({
                 'ok': False,
                 'error': 'Bot not found'
             }, status=404)
+        
+        print(f'INFO: Retrieved bot data for {bot_id}')
+        
+        # Determine status from bot data
+        status_changes = bot_json.get('status_changes', [])
+        bot_status = 'processing'
+        if status_changes:
+            last_status = status_changes[-1].get('code', '')
+            if last_status in ['done', 'recording_done', 'bot.done']:
+                bot_status = 'completed'
         
         # Find or create BotRecording
         bot_recording, created = BotRecording.objects.update_or_create(
             bot_id=bot_id,
             defaults={
                 'recall_data': bot_json,
-                'status': 'completed' if bot_json.get('status') == 'bot.done' else 'processing'
+                'status': bot_status
             }
         )
+        
+        print(f'INFO: Saved bot recording to database (created: {created})')
         
         # Try to link to calendar event if bot_id matches
         try:
@@ -45,28 +72,52 @@ def retrieve_bot(request, bot_id: str):
             if calendar_event:
                 bot_recording.calendar_event_id = calendar_event.id
                 bot_recording.save()
+                print(f'INFO: Linked bot to calendar event {calendar_event.id}')
         except Exception as e:
             print(f'INFO: Could not link bot to calendar event: {e}')
         
-        # Download artifacts if recordings exist
-        download_results = None
-        if bot_json.get('recordings'):
-            try:
-                download_results = download_and_save_artifacts(bot_recording, bot_json)
-            except Exception as e:
-                print(f'ERROR: Failed to download artifacts: {e}')
-                import traceback
-                traceback.print_exc()
+        # Fetch AssemblyAI transcript if available (after meeting ends)
+        assemblyai_transcript = None
+        assemblyai_transcript_id = None
         
-        # Return bot data with download results
+        if bot_status == 'completed':
+            # Only fetch transcript if bot is completed
+            assemblyai_transcript_id = extract_assemblyai_transcript_id(bot_json)
+            
+            if assemblyai_transcript_id:
+                print(f'INFO: Found AssemblyAI transcript ID: {assemblyai_transcript_id}')
+                try:
+                    assemblyai_transcript = get_assemblyai_transcript(assemblyai_transcript_id)
+                    if assemblyai_transcript:
+                        print(f'INFO: Successfully fetched AssemblyAI transcript')
+                        # Save transcript to bot_recording.recall_data
+                        recall_data = bot_recording.recall_data.copy()
+                        recall_data['assemblyai_transcript'] = assemblyai_transcript
+                        recall_data['assemblyai_transcript_id'] = assemblyai_transcript_id
+                        bot_recording.recall_data = recall_data
+                        bot_recording.save()
+                        print(f'INFO: Saved AssemblyAI transcript to database')
+                except Exception as e:
+                    print(f'WARNING: Failed to fetch AssemblyAI transcript: {e}')
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f'INFO: No AssemblyAI transcript ID found in bot data')
+        else:
+            print(f'INFO: Bot not completed yet, skipping AssemblyAI transcript fetch')
+        
+        # Return bot data (no downloading)
         response_data = {
             'ok': True,
             'bot_id': bot_id,
             'bot_data': bot_json,
             'recording_id': str(bot_recording.id),
-            'download_results': download_results
+            'status': bot_status,
+            'assemblyai_transcript_id': assemblyai_transcript_id,
+            'assemblyai_transcript': assemblyai_transcript
         }
         
+        print(f'INFO: Successfully retrieved bot {bot_id}')
         return JsonResponse(response_data)
         
     except Exception as e:
@@ -75,7 +126,8 @@ def retrieve_bot(request, bot_id: str):
         traceback.print_exc()
         return JsonResponse({
             'ok': False,
-            'error': str(e)
+            'error': str(e),
+            'bot_id': bot_id
         }, status=500)
 
 
@@ -95,7 +147,16 @@ def view_recording(request, recording_id: str):
     transcript_data = None
     if transcript_artifact and transcript_artifact.file_path:
         try:
-            with open(transcript_artifact.file_path, 'r', encoding='utf-8') as f:
+            # Handle both absolute and relative paths
+            file_path = transcript_artifact.file_path
+            if not Path(file_path).is_absolute():
+                # Relative path - resolve from BASE_DIR
+                from django.conf import settings
+                transcript_path = Path(settings.BASE_DIR) / file_path
+            else:
+                transcript_path = Path(file_path)
+            
+            with open(transcript_path, 'r', encoding='utf-8') as f:
                 transcript_data = json.load(f)
         except Exception as e:
             print(f'ERROR: Failed to load transcript: {e}')
@@ -135,7 +196,15 @@ def serve_video(request, recording_id: str):
     if not video_artifact or not video_artifact.file_path:
         raise Http404('Video not found')
     
-    video_path = Path(video_artifact.file_path)
+    # Handle both absolute and relative paths
+    file_path = video_artifact.file_path
+    if not Path(file_path).is_absolute():
+        # Relative path - resolve from BASE_DIR
+        from django.conf import settings
+        video_path = Path(settings.BASE_DIR) / file_path
+    else:
+        video_path = Path(file_path)
+    
     if not video_path.exists():
         raise Http404('Video file not found')
     
@@ -162,7 +231,15 @@ def serve_transcript(request, recording_id: str):
     if not transcript_artifact or not transcript_artifact.file_path:
         raise Http404('Transcript not found')
     
-    transcript_path = Path(transcript_artifact.file_path)
+    # Handle both absolute and relative paths
+    file_path = transcript_artifact.file_path
+    if not Path(file_path).is_absolute():
+        # Relative path - resolve from BASE_DIR
+        from django.conf import settings
+        transcript_path = Path(settings.BASE_DIR) / file_path
+    else:
+        transcript_path = Path(file_path)
+    
     if not transcript_path.exists():
         raise Http404('Transcript file not found')
     

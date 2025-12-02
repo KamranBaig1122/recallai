@@ -143,6 +143,7 @@ class RecordingArtifact(models.Model):
         ('video_mixed', 'Video Mixed'),
         ('audio_mixed', 'Audio Mixed'),
         ('transcript', 'Transcript'),
+        ('provider_transcript', 'Provider Transcript'),
         ('audio_separate', 'Audio Separate'),
     ]
     
@@ -152,7 +153,8 @@ class RecordingArtifact(models.Model):
     artifact_type = models.CharField(max_length=50, choices=ARTIFACT_TYPES)
     
     # File storage
-    file_path = models.CharField(max_length=500, null=True, blank=True)  # Local file path
+    # Using relative paths to keep under database limit
+    file_path = models.CharField(max_length=1000, null=True, blank=True)  # Local file path (relative to BASE_DIR)
     file_size = models.BigIntegerField(null=True, blank=True)  # File size in bytes
     file_format = models.CharField(max_length=50, null=True, blank=True)  # mp4, json, mp3, etc.
     

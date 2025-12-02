@@ -6,7 +6,7 @@ import time
 from django.utils import timezone
 from app.models import BotRecording, CalendarEvent
 from app.services.recall.service import get_service
-from app.services.recall.artifact_downloader import download_and_save_artifacts
+# Artifact downloading removed - only retrieve bot data
 import traceback
 
 
@@ -62,21 +62,10 @@ def auto_retrieve_bot(bot_id: str, calendar_event_id: str = None, retry_count: i
             }
         )
         
-        # Download artifacts if recordings exist
-        download_results = None
-        if recordings:
-            try:
-                download_results = download_and_save_artifacts(bot_recording, bot_json)
-                print(f'INFO: Downloaded artifacts for bot {bot_id}: {download_results}')
-            except Exception as e:
-                print(f'ERROR: Failed to download artifacts for bot {bot_id}: {e}')
-                traceback.print_exc()
-        
         return {
             'success': True,
             'recording_id': str(bot_recording.id),
             'bot_id': bot_id,
-            'download_results': download_results,
             'status': status
         }
         

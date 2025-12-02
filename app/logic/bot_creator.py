@@ -201,15 +201,56 @@ def _build_recording_config():
         logo_url = f"{public_url}/static/ellie-logo.svg"
     
     # Build recording config
+    # Use AssemblyAI for realtime transcription if configured in Recall.ai dashboard
+    # Note: AssemblyAI credentials must be configured in Recall.ai dashboard first
+    # https://us-west-2.recall.ai/dashboard/transcription
+    # Check if USE_ASSEMBLY_AI is set to 'true' (case-insensitive)
+    # IMPORTANT: The API key itself should be configured in Recall.ai dashboard, not here
+    use_assembly_ai_env = os.getenv('USE_ASSEMBLY_AI', '').strip()
+    use_assembly_ai = use_assembly_ai_env.lower() == 'true'
+    
+    if use_assembly_ai_env and use_assembly_ai_env.lower() != 'true' and use_assembly_ai_env.lower() != 'false':
+        # If it's set but not 'true' or 'false', it might be an API key - warn user
+        print(f'WARNING: USE_ASSEMBLY_AI is set to "{use_assembly_ai_env[:10]}..." but should be "true" or "false"')
+        print('WARNING: AssemblyAI API key should be configured in Recall.ai dashboard, not in .env file')
+        print('WARNING: Setting USE_ASSEMBLY_AI=true to enable AssemblyAI (assuming you want it enabled)')
+        use_assembly_ai = True
+    
+    transcript_provider = {}
+    if use_assembly_ai:
+        # Use AssemblyAI async chunked for realtime transcription
+        # IMPORTANT: AssemblyAI credentials must be configured in Recall.ai dashboard
+        # Go to: https://us-west-2.recall.ai/dashboard/transcription (or your region)
+        transcript_provider = {
+            "assembly_ai_async_chunked": {
+                "language_code": "en_us",  # Default to US English
+                "auto_highlights": False,
+                "auto_chapters": False,
+                "entity_detection": False,
+                "sentiment_analysis": False,
+                "speaker_labels": True,  # Enable speaker diarization
+                "punctuate": True,
+                "format_text": True,
+                # Enable summarization
+                "summarization": True,
+                "summary_model": "informative",  # Options: "informative", "conversational", "catchy"
+                "summary_type": "paragraph"  # Options: "bullets", "bullets_verbose", "gist", "headline", "paragraph"
+            }
+        }
+    else:
+        # Default: Use Recall.ai streaming transcription
+        # This works out of the box without additional configuration
+        transcript_provider = {
+            "recallai_streaming": {
+                "language_code": "en",
+                "filter_profanity": False,
+                "mode": "prioritize_low_latency"
+            }
+        }
+    
     recording_config = {
         "transcript": {
-            "provider": {
-                "recallai_streaming": {
-                    "language_code": "en",
-                    "filter_profanity": False,
-                    "mode": "prioritize_low_latency"
-                }
-            },
+            "provider": transcript_provider,
             # Add logo URL to metadata (custom metadata field)
             "metadata": {
                 "bot_avatar_url": logo_url

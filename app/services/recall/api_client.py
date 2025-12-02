@@ -32,6 +32,17 @@ class RecallApiClient:
         
         print(f'Making {method} request to {url} with token {self.api_key}...')
         
+        # Remove None values from nested dicts to avoid sending null in JSON
+        def clean_none_values(obj):
+            if isinstance(obj, dict):
+                return {k: clean_none_values(v) for k, v in obj.items() if v is not None}
+            elif isinstance(obj, list):
+                return [clean_none_values(item) for item in obj]
+            return obj
+        
+        if data:
+            data = clean_none_values(data)
+        
         if method == 'GET':
             response = requests.get(url, headers=headers)
         elif method == 'POST':

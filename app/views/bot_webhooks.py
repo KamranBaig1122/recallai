@@ -64,11 +64,16 @@ def bot_webhook(request):
             if code in ["bot.done", "recording_done", "done"]:
                 bot_id = payload.get("bot_id") or event_data.get("bot_id")
                 if bot_id:
-                    print(f'[bot-wh] Bot {bot_id} is done, triggering auto-retrieve...')
+                    print(f'[bot-wh] Bot {bot_id} is done, triggering auto-retrieve and AssemblyAI transcript fetch...')
                     try:
                         # Import here to avoid circular imports
                         from app.logic.bot_retriever import auto_retrieve_bot
                         from app.models import CalendarEvent
+                        from app.services.assemblyai.transcript_fetcher import (
+                            get_assemblyai_transcript,
+                            extract_assemblyai_transcript_id
+                        )
+                        from app.services.recall.service import get_service
                         
                         # Find calendar event with this bot_id
                         calendar_event = CalendarEvent.objects.filter(
@@ -77,13 +82,55 @@ def bot_webhook(request):
                         
                         calendar_event_id = str(calendar_event.id) if calendar_event else None
                         
-                        # Trigger auto-retrieve (async/background)
+                        # Trigger auto-retrieve and AssemblyAI transcript fetch (async/background)
                         # Use threading to avoid blocking webhook response
                         import threading
                         def retrieve_in_background():
+                            # First, retrieve bot data
                             result = auto_retrieve_bot(bot_id, calendar_event_id)
                             if result['success']:
                                 print(f'[bot-wh] ✓ Auto-retrieved bot {bot_id}: {result.get("recording_id")}')
+                                
+                                # Now fetch AssemblyAI transcript
+                                try:
+                                    # Get fresh bot data to find transcript ID
+                                    recall_service = get_service()
+                                    bot_json = recall_service.get_bot(bot_id)
+                                    
+                                    if bot_json:
+                                        # Extract AssemblyAI transcript ID
+                                        transcript_id = extract_assemblyai_transcript_id(bot_json)
+                                        
+                                        if transcript_id:
+                                            print(f'[bot-wh] Found AssemblyAI transcript ID: {transcript_id}')
+                                            
+                                            # Fetch full transcript from AssemblyAI
+                                            assemblyai_transcript = get_assemblyai_transcript(transcript_id)
+                                            
+                                            if assemblyai_transcript:
+                                                # Save transcript to database
+                                                from app.models import BotRecording
+                                                bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                                                
+                                                if bot_recording:
+                                                    recall_data = bot_recording.recall_data.copy()
+                                                    recall_data['assemblyai_transcript'] = assemblyai_transcript
+                                                    recall_data['assemblyai_transcript_id'] = transcript_id
+                                                    bot_recording.recall_data = recall_data
+                                                    bot_recording.save()
+                                                    print(f'[bot-wh] ✓ Saved AssemblyAI transcript to database')
+                                                else:
+                                                    print(f'[bot-wh] WARNING: BotRecording not found for bot {bot_id}')
+                                            else:
+                                                print(f'[bot-wh] WARNING: Failed to fetch AssemblyAI transcript')
+                                        else:
+                                            print(f'[bot-wh] INFO: No AssemblyAI transcript ID found in bot data')
+                                    else:
+                                        print(f'[bot-wh] WARNING: Could not fetch bot data for transcript extraction')
+                                except Exception as e:
+                                    print(f'[bot-wh] ERROR: Failed to fetch AssemblyAI transcript: {e}')
+                                    import traceback
+                                    traceback.print_exc()
                             else:
                                 print(f'[bot-wh] ⚠ Auto-retrieve failed for bot {bot_id}: {result.get("error")}')
                         
