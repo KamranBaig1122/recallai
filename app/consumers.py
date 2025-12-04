@@ -120,3 +120,62 @@ class BotRealtimeConsumer(AsyncWebsocketConsumer):
         else:
             print(f'[ws] event {event}')
 
+
+class CalendarUpdatesConsumer(AsyncWebsocketConsumer):
+    """
+    WebSocket consumer for real-time calendar updates.
+    Sends updates to frontend when calendar events are synced via webhooks.
+    """
+    
+    async def connect(self):
+        """Handle WebSocket connection"""
+        # Get userId from query string
+        query_string = self.scope.get('query_string', b'').decode('utf-8')
+        self.user_id = None
+        for param in query_string.split('&'):
+            if '=' in param:
+                key, value = param.split('=', 1)
+                if key == 'userId':
+                    self.user_id = value
+                    break
+        
+        if not self.user_id:
+            await self.close(code=1008, reason='userId parameter required')
+            return
+        
+        # Add to group for this user
+        self.group_name = f'calendar_updates_{self.user_id}'
+        await self.channel_layer.group_add(
+            self.group_name,
+            self.channel_name
+        )
+        
+        await self.accept()
+        print(f'[ws] Calendar updates consumer connected for user {self.user_id}')
+    
+    async def disconnect(self, close_code):
+        """Handle WebSocket disconnection"""
+        if hasattr(self, 'group_name'):
+            await self.channel_layer.group_discard(
+                self.group_name,
+                self.channel_name
+            )
+        print(f'[ws] Calendar updates consumer disconnected (code: {close_code})')
+    
+    async def receive(self, text_data=None, bytes_data=None):
+        """Handle incoming WebSocket messages (ping/pong for keepalive)"""
+        if text_data:
+            try:
+                data = json.loads(text_data)
+                if data.get('type') == 'ping':
+                    await self.send(text_data=json.dumps({'type': 'pong'}))
+            except:
+                pass
+    
+    async def calendar_update(self, event):
+        """Send calendar update to WebSocket"""
+        message = event['message']
+        await self.send(text_data=json.dumps({
+            'type': 'calendar_update',
+            'data': message
+        }))

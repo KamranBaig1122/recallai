@@ -41,10 +41,11 @@ def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
         start_time = timezone.make_aware(start_time)
     
     # Check if event is in the past
-    if start_time <= timezone.now():
+    # Allow creating bots for past events if force=True (manual creation for synced meetings)
+    if start_time <= timezone.now() and not force:
         return {
             'success': False,
-            'error': 'Event start time is in the past'
+            'error': 'Event start time is in the past. Use force=True to create bot for past meetings.'
         }
     
     # Check if already has a bot (unless force=True)
@@ -218,25 +219,21 @@ def _build_recording_config():
     
     transcript_provider = {}
     if use_assembly_ai:
-        # Use AssemblyAI async chunked for realtime transcription
+        # Use AssemblyAI v3 streaming for realtime transcription (as per demo project)
         # IMPORTANT: AssemblyAI credentials must be configured in Recall.ai dashboard
         # Go to: https://us-west-2.recall.ai/dashboard/transcription (or your region)
+        # This matches the assemblyai-recallai-zoom-bot demo implementation
         transcript_provider = {
-            "assembly_ai_async_chunked": {
-                "language_code": "en_us",  # Default to US English
-                "auto_highlights": False,
-                "auto_chapters": False,
-                "entity_detection": False,
-                "sentiment_analysis": False,
-                "speaker_labels": True,  # Enable speaker diarization
-                "punctuate": True,
-                "format_text": True,
-                # Enable summarization
+            "assembly_ai_v3_streaming": {
+                # Enable formatted text with punctuation and proper casing (as per demo)
+                "format_turns": True,
+                # Enable summarization for final transcript
                 "summarization": True,
                 "summary_model": "informative",  # Options: "informative", "conversational", "catchy"
                 "summary_type": "paragraph"  # Options: "bullets", "bullets_verbose", "gist", "headline", "paragraph"
             }
         }
+        print(f'[BotCreator] Using AssemblyAI v3 streaming transcription (as per demo project)')
     else:
         # Default: Use Recall.ai streaming transcription
         # This works out of the box without additional configuration
@@ -270,6 +267,31 @@ def _build_recording_config():
     # Add realtime endpoints if configured
     if endpoints:
         recording_config["realtime_endpoints"] = endpoints
+    
+    # Add webhook endpoint for real-time transcripts (as per demo project)
+    # This allows us to receive transcript.data and transcript.partial_data events
+    if public_url:
+        webhook_url = f"{public_url}/wh"
+        if "realtime_endpoints" not in recording_config:
+            recording_config["realtime_endpoints"] = []
+        
+        # Add webhook endpoint for transcript events (matching demo project)
+        # Check if webhook endpoint already exists to avoid duplicates
+        webhook_exists = any(
+            ep.get("type") == "webhook" and ep.get("url") == webhook_url
+            for ep in recording_config["realtime_endpoints"]
+        )
+        
+        if not webhook_exists:
+            recording_config["realtime_endpoints"].append({
+                "type": "webhook",
+                "events": [
+                    "transcript.data",  # Final transcript segments
+                    "transcript.partial_data"  # Real-time partial transcripts
+                ],
+                "url": webhook_url
+            })
+            print(f'[BotCreator] Added webhook endpoint for real-time transcripts: {webhook_url}')
     
     return recording_config
 

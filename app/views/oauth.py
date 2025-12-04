@@ -70,11 +70,21 @@ def google_calendar_callback(request):
             )
         
         email = local_calendar.email or ''
-        response = redirect('/')
-        response.set_cookie('notice', json.dumps(generate_notice(
-            'success',
-            f'Successfully connected google calendar{" for " + email if email else ""}'
-        )))
+        # Redirect to React app integrations page if FRONTEND_URL is set
+        frontend_url = settings.FRONTEND_URL if hasattr(settings, 'FRONTEND_URL') else None
+        if frontend_url:
+            from urllib.parse import urlencode
+            params = {'connected': 'google'}
+            if email:
+                params['email'] = email
+            redirect_url = f"{frontend_url}/integrations?{urlencode(params)}"
+            response = redirect(redirect_url)
+        else:
+            response = redirect('/')
+            response.set_cookie('notice', json.dumps(generate_notice(
+                'success',
+                f'Successfully connected google calendar{" for " + email if email else ""}'
+            )))
         return response
         
     except Exception as err:
@@ -141,11 +151,21 @@ def microsoft_outlook_callback(request):
             )
         
         email = local_calendar.email or ''
-        response = redirect('/')
-        response.set_cookie('notice', json.dumps(generate_notice(
-            'success',
-            f'Successfully connected microsoft calendar{" for " + email if email else ""}'
-        )))
+        # Redirect to React app integrations page if FRONTEND_URL is set
+        frontend_url = settings.FRONTEND_URL if hasattr(settings, 'FRONTEND_URL') else None
+        if frontend_url:
+            from urllib.parse import urlencode
+            params = {'connected': 'microsoft'}
+            if email:
+                params['email'] = email
+            redirect_url = f"{frontend_url}/integrations?{urlencode(params)}"
+            response = redirect(redirect_url)
+        else:
+            response = redirect('/')
+            response.set_cookie('notice', json.dumps(generate_notice(
+                'success',
+                f'Successfully connected microsoft calendar{" for " + email if email else ""}'
+            )))
         return response
         
     except Exception as err:

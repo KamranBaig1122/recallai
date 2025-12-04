@@ -135,6 +135,32 @@ def recall_calendar_updates(request):
                 result = sync_calendar_events(calendar, last_updated_timestamp=last_updated_ts)
                 if result.get('success'):
                     print(f'INFO: Successfully synced events for calendar {calendar.id}: {result.get("upserted", 0)} upserted, {result.get("deleted", 0)} deleted')
+                    
+                    # Broadcast update to WebSocket clients for this user
+                    try:
+                        from channels.layers import get_channel_layer
+                        from asgiref.sync import async_to_sync
+                        channel_layer = get_channel_layer()
+                        if channel_layer:
+                            group_name = f'calendar_updates_{calendar.user_id}'
+                            async_to_sync(channel_layer.group_send)(
+                                group_name,
+                                {
+                                    'type': 'calendar_update',
+                                    'message': {
+                                        'calendar_id': str(calendar.id),
+                                        'event': 'sync_events',
+                                        'upserted': result.get('upserted', 0),
+                                        'deleted': result.get('deleted', 0),
+                                        'timestamp': last_updated_ts,
+                                    }
+                                }
+                            )
+                            print(f'INFO: Broadcasted calendar update to WebSocket group {group_name}')
+                    except Exception as ws_error:
+                        print(f'WARNING: Failed to broadcast WebSocket update: {ws_error}')
+                        import traceback
+                        traceback.print_exc()
                 else:
                     print(f'ERROR: Sync failed for calendar {calendar.id}: {result.get("error", "Unknown error")}')
             except Exception as e:

@@ -169,3 +169,44 @@ class RecordingArtifact(models.Model):
     class Meta:
         db_table = 'recording_artifacts'
         unique_together = [['bot_recording_id', 'recording_id', 'artifact_type']]
+
+
+class MeetingTranscription(models.Model):
+    """Stores meeting transcriptions and summaries from AssemblyAI"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    calendar_event_id = models.UUIDField()  # Link to calendar event
+    bot_id = models.CharField(max_length=255)  # Recall.ai bot ID
+    assemblyai_transcript_id = models.CharField(max_length=255, null=True, blank=True)  # AssemblyAI transcript ID (not unique for real-time)
+    
+    # Transcription data from AssemblyAI
+    transcript_data = JSONField(default=dict)  # Full transcript JSON from AssemblyAI
+    transcript_text = models.TextField(null=True, blank=True)  # Full transcript text
+    summary = models.TextField(null=True, blank=True)  # Summary if available
+    
+    # Metadata
+    status = models.CharField(max_length=50, default='processing')  # processing, completed, failed
+    language = models.CharField(max_length=10, null=True, blank=True)  # Language code (e.g., 'en')
+    duration = models.FloatField(null=True, blank=True)  # Duration in seconds
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'meeting_transcriptions'
+        # One transcription per bot per event (real-time transcripts get merged)
+        unique_together = [['calendar_event_id', 'bot_id']]
+        indexes = [
+            models.Index(fields=['calendar_event_id']),
+            models.Index(fields=['bot_id']),
+            models.Index(fields=['assemblyai_transcript_id']),
+        ]
+    
+    @property
+    def utterances(self):
+        """Get utterances array from transcript_data"""
+        return self.transcript_data.get('utterances', [])
+    
+    @property
+    def words(self):
+        """Get words array from transcript_data"""
+        return self.transcript_data.get('words', [])

@@ -3,9 +3,10 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from app.logic.oauth import build_google_calendar_oauth_url, build_microsoft_outlook_oauth_url
-from app.models import Calendar, User, CalendarEvent, CalendarWebhook
+from app.models import Calendar, User, CalendarEvent, CalendarWebhook, MeetingTranscription
 from app.logic.auth import get_user_from_auth_token
 from app.logic.sync import sync_calendar_events
+from app.services.recall.service import get_service
 from datetime import datetime
 
 
@@ -38,10 +39,10 @@ def add_cors_headers(response, request=None):
             allowed_headers = requested_headers_str
         else:
             # No headers requested, use defaults
-            allowed_headers = 'Authorization, Content-Type, Accept'
+            allowed_headers = 'Content-Type, Accept, ngrok-skip-browser-warning'
     else:
         # Not an OPTIONS request, use defaults
-        allowed_headers = 'Authorization, Content-Type, Accept'
+        allowed_headers = 'Content-Type, Accept, ngrok-skip-browser-warning'
     
     response['Access-Control-Allow-Methods'] = 'GET, POST, PATCH, PUT, DELETE, OPTIONS'
     response['Access-Control-Allow-Headers'] = allowed_headers
@@ -50,36 +51,23 @@ def add_cors_headers(response, request=None):
     return response
 
 
-def get_authenticated_user(request, userId=None):
+def get_user_from_request(request, userId=None):
     """
-    Get authenticated user from either Bearer token, cookie, or userId.
-    If userId is provided and token is valid, use that user.
+    Get user from userId parameter (no authentication required).
+    userId can come from query params or request body.
     """
-    # Try Bearer token first (for API calls from frontend)
-    auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-    if auth_header.startswith('Bearer '):
-        token = auth_header.split(' ')[1]
-        # Try to decode with recallai backend's secret
-        user = get_user_from_auth_token(token)
-        if user:
-            return user
-        
-        # If userId is provided in request, try to get user by ID
-        # This allows frontend to use main API token but specify recallai user
-        if userId:
-            try:
-                return User.objects.get(id=userId)
-            except User.DoesNotExist:
-                pass
+    # Get userId from query params or request body
+    if not userId:
+        userId = request.GET.get('userId')
     
-    # Fallback to cookie-based auth (for existing backend)
-    auth_token = request.COOKIES.get('authToken')
-    if auth_token:
-        user = get_user_from_auth_token(auth_token)
-        if user:
-            return user
+    if not userId and request.body:
+        try:
+            import json
+            data = json.loads(request.body)
+            userId = data.get('userId')
+        except:
+            pass
     
-    # If userId provided, try to get user directly (for development/testing)
     if userId:
         try:
             return User.objects.get(id=userId)
@@ -115,20 +103,18 @@ def api_list_calendars(request):
     
     print('Handling GET request (not OPTIONS)')
     try:
-        # Try to get userId from query params or use authenticated user
+        # Get userId from query params (no authentication required)
         userId = request.GET.get('userId')
         print(f'GET request received. userId param: {userId}')
-        print(f'Authorization header: {request.META.get("HTTP_AUTHORIZATION", "None")[:50]}')
         
-        user = get_authenticated_user(request, userId)
-        
-        if not user:
-            print(f'WARNING: No authenticated user found. userId param: {userId}')
-            response = JsonResponse({'error': 'Unauthorized'}, status=401)
+        if not userId:
+            response = JsonResponse({'error': 'userId parameter is required'}, status=400)
             return add_cors_headers(response, request)
         
-        print(f'Found user: {user.id}, fetching calendars...')
-        calendars = user.get_calendars()
+        # Fetch calendars directly by user_id (no need for User object to exist)
+        # This allows calendars to be created via OAuth even if user doesn't exist in DB yet
+        print(f'Fetching calendars for userId: {userId}')
+        calendars = Calendar.objects.filter(user_id=userId)
         
         calendar_list = []
         for cal in calendars:
@@ -163,7 +149,7 @@ def api_get_connect_urls(request):
         return add_cors_headers(response, request)
     
     try:
-        # Get userId from query params or request body
+        # Get userId from query params or request body (no authentication required)
         userId = request.GET.get('userId')
         print(f'GET request received. userId param: {userId}')
         
@@ -175,11 +161,7 @@ def api_get_connect_urls(request):
             except json.JSONDecodeError:
                 pass
         
-        # Get authenticated user or use userId from request
-        user = get_authenticated_user(request, userId)
-        if user:
-            userId = str(user.id)
-        elif not userId:
+        if not userId:
             response = JsonResponse({'error': 'userId is required'}, status=400)
             return add_cors_headers(response, request)
         
@@ -208,17 +190,18 @@ def api_get_calendar(request, calendar_id):
         response = JsonResponse({})
         return add_cors_headers(response, request)
     
-    user = get_authenticated_user(request)
-    if not user:
-        response = JsonResponse({'error': 'Unauthorized'}, status=401)
+    # Get userId from query params (no authentication required)
+    userId = request.GET.get('userId')
+    if not userId:
+        response = JsonResponse({'error': 'userId parameter is required'}, status=400)
         return add_cors_headers(response, request)
     
     try:
         calendar = Calendar.objects.get(id=calendar_id)
         
-        # Verify the calendar belongs to the authenticated user
-        if str(calendar.user_id) != str(user.id):
-            response = JsonResponse({'error': 'Unauthorized'}, status=403)
+        # Verify the calendar belongs to the user
+        if str(calendar.user_id) != str(userId):
+            response = JsonResponse({'error': 'Calendar does not belong to this user'}, status=403)
             return add_cors_headers(response, request)
         
         # Get events
@@ -242,6 +225,7 @@ def api_get_calendar(request, calendar_id):
                 'end_time': event.end_time.isoformat() if event.end_time else None,
                 'meeting_url': event.meeting_url,
                 'should_record_manual': event.should_record_manual,
+                'bots': event.bots,  # Include bots array to check if bot exists
             })
         
         # Serialize webhooks
@@ -284,17 +268,18 @@ def api_update_calendar(request, calendar_id):
         response = JsonResponse({})
         return add_cors_headers(response, request)
     
-    user = get_authenticated_user(request)
-    if not user:
-        response = JsonResponse({'error': 'Unauthorized'}, status=401)
+    # Get userId from query params (no authentication required)
+    userId = request.GET.get('userId')
+    if not userId:
+        response = JsonResponse({'error': 'userId parameter is required'}, status=400)
         return add_cors_headers(response, request)
     
     try:
         calendar = Calendar.objects.get(id=calendar_id)
         
-        # Verify the calendar belongs to the authenticated user
-        if str(calendar.user_id) != str(user.id):
-            response = JsonResponse({'error': 'Unauthorized'}, status=403)
+        # Verify the calendar belongs to the user
+        if str(calendar.user_id) != str(userId):
+            response = JsonResponse({'error': 'Calendar does not belong to this user'}, status=403)
             return add_cors_headers(response, request)
         
         # Parse request body
@@ -336,17 +321,18 @@ def api_sync_calendar(request, calendar_id):
         response = JsonResponse({})
         return add_cors_headers(response, request)
     
-    user = get_authenticated_user(request)
-    if not user:
-        response = JsonResponse({'error': 'Unauthorized'}, status=401)
+    # Get userId from query params (no authentication required)
+    userId = request.GET.get('userId')
+    if not userId:
+        response = JsonResponse({'error': 'userId parameter is required'}, status=400)
         return add_cors_headers(response, request)
     
     try:
         calendar = Calendar.objects.get(id=calendar_id)
         
-        # Verify the calendar belongs to the authenticated user
-        if str(calendar.user_id) != str(user.id):
-            response = JsonResponse({'error': 'Unauthorized'}, status=403)
+        # Verify the calendar belongs to the user
+        if str(calendar.user_id) != str(userId):
+            response = JsonResponse({'error': 'Calendar does not belong to this user'}, status=403)
             return add_cors_headers(response, request)
         
         # Sync events
@@ -387,18 +373,19 @@ def api_set_manual_record(request, event_id):
         response = JsonResponse({})
         return add_cors_headers(response, request)
     
-    user = get_authenticated_user(request)
-    if not user:
-        response = JsonResponse({'error': 'Unauthorized'}, status=401)
+    # Get userId from query params (no authentication required)
+    userId = request.GET.get('userId')
+    if not userId:
+        response = JsonResponse({'error': 'userId parameter is required'}, status=400)
         return add_cors_headers(response, request)
     
     try:
         event = CalendarEvent.objects.get(id=event_id)
         calendar = Calendar.objects.get(id=event.calendar_id)
         
-        # Verify the calendar belongs to the authenticated user
-        if str(calendar.user_id) != str(user.id):
-            response = JsonResponse({'error': 'Unauthorized'}, status=403)
+        # Verify the calendar belongs to the user
+        if str(calendar.user_id) != str(userId):
+            response = JsonResponse({'error': 'Calendar does not belong to this user'}, status=403)
             return add_cors_headers(response, request)
         
         # Parse request body
@@ -445,24 +432,37 @@ def api_delete_calendar(request, calendar_id):
         response = JsonResponse({})
         return add_cors_headers(response, request)
     
-    user = get_authenticated_user(request)
-    if not user:
-        response = JsonResponse({'error': 'Unauthorized'}, status=401)
+    # Get userId from query params (no authentication required)
+    userId = request.GET.get('userId')
+    if not userId:
+        response = JsonResponse({'error': 'userId parameter is required'}, status=400)
         return add_cors_headers(response, request)
     
     try:
         calendar = Calendar.objects.get(id=calendar_id)
         
-        # Verify the calendar belongs to the authenticated user
-        if str(calendar.user_id) != str(user.id):
-            response = JsonResponse({'error': 'Unauthorized'}, status=403)
+        # Verify the calendar belongs to the user
+        if str(calendar.user_id) != str(userId):
+            response = JsonResponse({'error': 'Calendar does not belong to this user'}, status=403)
             return add_cors_headers(response, request)
         
-        # Delete related events and webhooks
+        # Delete from Recall.ai first
+        recall_service = get_service()
+        recall_id = calendar.recall_id
+        try:
+            recall_service.delete_calendar(recall_id)
+            print(f'INFO: Successfully deleted calendar {recall_id} from Recall.ai')
+        except Exception as e:
+            # Log warning but continue with local deletion
+            print(f'WARNING: Could not delete calendar from Recall API: {e}')
+            import traceback
+            traceback.print_exc()
+        
+        # Delete related events and webhooks from local database
         CalendarEvent.objects.filter(calendar_id=calendar_id).delete()
         CalendarWebhook.objects.filter(calendar_id=calendar_id).delete()
         
-        # Delete calendar
+        # Delete calendar from local database
         calendar.delete()
         
         response = JsonResponse({'message': 'Calendar deleted successfully'}, status=200)
@@ -474,3 +474,58 @@ def api_delete_calendar(request, calendar_id):
         response = JsonResponse({'error': str(e)}, status=500)
         return add_cors_headers(response, request)
 
+
+@require_http_methods(["POST", "OPTIONS"])
+@csrf_exempt
+def api_create_bot_for_event(request, event_id):
+    """Create a bot for a calendar event (for previous meetings)"""
+    if request.method == 'OPTIONS':
+        response = JsonResponse({})
+        return add_cors_headers(response, request)
+    
+    # Get userId from query params (no authentication required)
+    userId = request.GET.get('userId')
+    if not userId:
+        response = JsonResponse({'error': 'userId parameter is required'}, status=400)
+        return add_cors_headers(response, request)
+    
+    try:
+        from app.models import CalendarEvent
+        from app.logic.bot_creator import create_bot_for_event
+        
+        event = CalendarEvent.objects.get(id=event_id)
+        calendar = Calendar.objects.get(id=event.calendar_id)
+        
+        # Verify the calendar belongs to the user
+        if str(calendar.user_id) != str(userId):
+            response = JsonResponse({'error': 'Calendar does not belong to this user'}, status=403)
+            return add_cors_headers(response, request)
+        
+        # Create bot for event
+        # Allow creating bots for past meetings (meetings synced after calendar connection)
+        # Note: Bots for past meetings won't be able to join, but can be created for record-keeping
+        result = create_bot_for_event(event, force=True)
+        
+        if result['success']:
+            response = JsonResponse({
+                'success': True,
+                'message': f'Bot created successfully for event "{event.title}"',
+                'bot_id': result.get('bot_id'),
+                'join_at': result.get('join_at'),
+            })
+        else:
+            response = JsonResponse({
+                'success': False,
+                'error': result.get('error', 'Failed to create bot'),
+                'bot_id': result.get('bot_id'),  # May exist if already created
+            }, status=400)
+        
+        return add_cors_headers(response, request)
+    except CalendarEvent.DoesNotExist:
+        response = JsonResponse({'error': 'Event not found'}, status=404)
+        return add_cors_headers(response, request)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        response = JsonResponse({'error': str(e)}, status=500)
+        return add_cors_headers(response, request)

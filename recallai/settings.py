@@ -175,6 +175,7 @@ CHANNEL_LAYERS = {
 
 # Custom settings (PUBLIC_URL already defined above for CSRF settings)
 PORT = int(os.getenv('PORT', '3003'))
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')  # React app URL
 
 # Recall API settings
 RECALL_API_KEY = os.getenv('RECALL_API_KEY')
