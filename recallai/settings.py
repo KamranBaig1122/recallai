@@ -16,17 +16,28 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv('SECRET', 'django-insecure-change-this-in-production')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('NODE_ENV', 'development') == 'development'
+# Check both explicit DEBUG env var and NODE_ENV
+DEBUG_ENV = os.getenv('DEBUG', '').lower()
+if DEBUG_ENV in ('true', '1', 'yes'):
+    DEBUG = True
+elif DEBUG_ENV in ('false', '0', 'no'):
+    DEBUG = False
+else:
+    # Fallback to NODE_ENV check
+    DEBUG = os.getenv('NODE_ENV', 'development') == 'development'
 
-ALLOWED_HOSTS = ['*']  # For development with ngrok
+ALLOWED_HOSTS = ['*']  # For EC2 deployment
 
 # Get PUBLIC_URL early for CSRF settings
 PUBLIC_URL = os.getenv('PUBLIC_URL', 'http://localhost:3003')
 
-# CSRF trusted origins - add ngrok URL here
+# CSRF trusted origins - add production domain and EC2 public IP here
 CSRF_TRUSTED_ORIGINS = [
     'http://localhost:3003',
     'http://127.0.0.1:3003',
+    'http://16.16.183.96:3003',  # EC2 public IP
+    'https://recallaiserver.inviteellie.ai',  # Production domain
+    'http://recallaiserver.inviteellie.ai',  # HTTP version (if needed)
 ]
 if PUBLIC_URL:
     CSRF_TRUSTED_ORIGINS.append(PUBLIC_URL)

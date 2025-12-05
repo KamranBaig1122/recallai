@@ -182,6 +182,7 @@ class MeetingTranscription(models.Model):
     transcript_data = JSONField(default=dict)  # Full transcript JSON from AssemblyAI
     transcript_text = models.TextField(null=True, blank=True)  # Full transcript text
     summary = models.TextField(null=True, blank=True)  # Summary if available
+    action_items = JSONField(default=list, null=True, blank=True)  # Action items extracted from transcript
     
     # Metadata
     status = models.CharField(max_length=50, default='processing')  # processing, completed, failed
@@ -210,3 +211,10 @@ class MeetingTranscription(models.Model):
     def words(self):
         """Get words array from transcript_data"""
         return self.transcript_data.get('words', [])
+    
+    @property
+    def action_items_list(self):
+        """Get action items array from transcript_data or action_items field"""
+        if self.action_items:
+            return self.action_items
+        return self.transcript_data.get('action_items', [])

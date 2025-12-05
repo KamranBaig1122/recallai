@@ -223,17 +223,22 @@ def _build_recording_config():
         # IMPORTANT: AssemblyAI credentials must be configured in Recall.ai dashboard
         # Go to: https://us-west-2.recall.ai/dashboard/transcription (or your region)
         # This matches the assemblyai-recallai-zoom-bot demo implementation
+        # IMPORTANT: As per demo project, we only set format_turns here
+        # Summarization and action_items are NOT set in bot creation
+        # They need to be requested when we SUBMIT audio to AssemblyAI for final processing
+        # However, with streaming transcription, we get real-time transcripts via webhooks
+        # For final transcript with summary/action_items, we need to check if AssemblyAI
+        # creates a transcript that can be fetched, or we need to submit the audio separately
         transcript_provider = {
             "assembly_ai_v3_streaming": {
                 # Enable formatted text with punctuation and proper casing (as per demo)
-                "format_turns": True,
-                # Enable summarization for final transcript
-                "summarization": True,
-                "summary_model": "informative",  # Options: "informative", "conversational", "catchy"
-                "summary_type": "paragraph"  # Options: "bullets", "bullets_verbose", "gist", "headline", "paragraph"
+                "format_turns": True
             }
         }
         print(f'[BotCreator] Using AssemblyAI v3 streaming transcription (as per demo project)')
+        print(f'[BotCreator] Configuration matches demo: only format_turns enabled')
+        print(f'[BotCreator] Real-time transcripts will come via webhook (transcript.data events)')
+        print(f'[BotCreator] For final transcript with summary/action_items, we will fetch from AssemblyAI API after meeting ends')
     else:
         # Default: Use Recall.ai streaming transcription
         # This works out of the box without additional configuration

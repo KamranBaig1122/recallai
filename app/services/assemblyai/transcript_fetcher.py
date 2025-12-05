@@ -183,3 +183,202 @@ def extract_assemblyai_transcript_id(bot_json: Dict[str, Any]) -> Optional[str]:
     print('[AssemblyAI] Checked all methods: data.id, provider URL, metadata, node.id')
     return None
 
+
+def get_audio_url_from_bot(bot_json: Dict[str, Any]) -> Optional[str]:
+    """
+    Extract audio file URL from bot data for submitting to AssemblyAI
+    
+    Args:
+        bot_json: Full bot data from Recall.ai
+        
+    Returns:
+        Audio file URL if found, None otherwise
+    """
+    recordings = bot_json.get('recordings', [])
+    
+    for recording in recordings:
+        media_shortcuts = recording.get('media_shortcuts', {})
+        
+        # Check for audio_mixed download URL
+        audio_mixed = media_shortcuts.get('audio_mixed', {})
+        if audio_mixed:
+            data = audio_mixed.get('data', {})
+            download_url = data.get('download_url') or data.get('url')
+            if download_url:
+                print(f'[AssemblyAI] ✅ Found audio URL: {download_url}')
+                return download_url
+        
+        # Check for audio_mixed_raw
+        audio_mixed_raw = media_shortcuts.get('audio_mixed_raw', {})
+        if audio_mixed_raw:
+            data = audio_mixed_raw.get('data', {})
+            download_url = data.get('download_url') or data.get('url')
+            if download_url:
+                print(f'[AssemblyAI] ✅ Found audio URL (raw): {download_url}')
+                return download_url
+        
+        # Check recordings array for audio files
+        artifacts = recording.get('artifacts', [])
+        for artifact in artifacts:
+            if artifact.get('type') in ['audio_mixed', 'audio_mixed_raw']:
+                download_url = artifact.get('download_url') or artifact.get('url')
+                if download_url:
+                    print(f'[AssemblyAI] ✅ Found audio URL in artifacts: {download_url}')
+                    return download_url
+    
+    print('[AssemblyAI] ⚠ WARNING: Could not find audio URL in bot data')
+    return None
+
+
+def submit_audio_for_transcription_with_summary(audio_url: str) -> Optional[str]:
+    """
+    Submit audio URL to AssemblyAI for transcription with summarization and action items
+    
+    Args:
+        audio_url: URL to the audio file
+        
+    Returns:
+        AssemblyAI transcript ID if submission successful, None otherwise
+    """
+    base_url = "https://api.assemblyai.com"
+    api_key = os.getenv('ASSEMBLY_AI_API_KEY', '')
+    
+    if not api_key:
+        print('[AssemblyAI] ⚠ WARNING: ASSEMBLY_AI_API_KEY not set')
+        return None
+    
+    submit_endpoint = f"{base_url}/v2/transcript"
+    
+    headers = {
+        "authorization": api_key,
+        "content-type": "application/json"
+    }
+    
+    # Request transcription with summarization and action items
+    payload = {
+        "audio_url": audio_url,
+        "summarization": True,
+        "summary_model": "informative",  # Options: "informative", "conversational", "catchy"
+        "summary_type": "paragraph",  # Options: "bullets", "bullets_verbose", "gist", "headline", "paragraph"
+        "action_items": True,  # Enable action items extraction
+        "speaker_labels": True,  # Enable speaker identification
+        "punctuate": True,
+        "format_text": True
+    }
+    
+    try:
+        print(f'[AssemblyAI] ==========================================')
+        print(f'[AssemblyAI] 📤 SUBMITTING AUDIO FOR TRANSCRIPTION')
+        print(f'[AssemblyAI] Audio URL: {audio_url[:100]}...')
+        print(f'[AssemblyAI] Features: Summarization + Action Items')
+        print(f'[AssemblyAI] ==========================================')
+        
+        response = requests.post(submit_endpoint, json=payload, headers=headers)
+        response.raise_for_status()
+        
+        result = response.json()
+        transcript_id = result.get('id')
+        
+        if transcript_id:
+            print(f'[AssemblyAI] ✅ Audio submitted successfully!')
+            print(f'[AssemblyAI] Transcript ID: {transcript_id}')
+            print(f'[AssemblyAI] Status: {result.get("status", "unknown")}')
+            print(f'[AssemblyAI] ==========================================')
+            return transcript_id
+        else:
+            print(f'[AssemblyAI] ❌ ERROR: No transcript ID in response')
+            print(f'[AssemblyAI] Response: {result}')
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        print(f'[AssemblyAI] ❌ ERROR: Failed to submit audio: {e}')
+        if hasattr(e, 'response') and e.response is not None:
+            print(f'[AssemblyAI] Response: {e.response.text}')
+        return None
+
+
+def generate_summary_and_action_items_from_transcript(transcript_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Use AssemblyAI LeMUR API to generate summary and action items from existing transcript text
+    
+    This is a fallback if we can't get audio URL or if audio submission fails
+    
+    Args:
+        transcript_text: The transcript text we already have
+        
+    Returns:
+        Dict with summary and action_items, or None if failed
+    """
+    base_url = "https://api.assemblyai.com"
+    api_key = os.getenv('ASSEMBLY_AI_API_KEY', '')
+    
+    if not api_key:
+        print('[AssemblyAI] ⚠ WARNING: ASSEMBLY_AI_API_KEY not set')
+        return None
+    
+    # LeMUR endpoint for generating summaries and action items
+    lemur_endpoint = f"{base_url}/lemur/v3/generate"
+    
+    headers = {
+        "authorization": api_key,
+        "content-type": "application/json"
+    }
+    
+    payload = {
+        "transcript_ids": [],  # Not using transcript IDs, using text directly
+        "prompt": f"""Please provide:
+1. A comprehensive summary of this meeting transcript
+2. A list of action items mentioned in the meeting
+
+Format your response as JSON with the following structure:
+{{
+  "summary": "detailed summary here",
+  "action_items": [
+    {{"text": "action item 1", "speaker": "speaker name if mentioned"}},
+    {{"text": "action item 2", "speaker": "speaker name if mentioned"}}
+  ]
+}}
+
+Transcript:
+{transcript_text[:5000]}"""  # Limit to 5000 chars for prompt
+    }
+    
+    try:
+        print(f'[AssemblyAI] ==========================================')
+        print(f'[AssemblyAI] 🤖 GENERATING SUMMARY & ACTION ITEMS')
+        print(f'[AssemblyAI] Using LeMUR API')
+        print(f'[AssemblyAI] ==========================================')
+        
+        response = requests.post(lemur_endpoint, json=payload, headers=headers)
+        response.raise_for_status()
+        
+        result = response.json()
+        # LeMUR returns text, we need to parse it
+        response_text = result.get('response', '')
+        
+        # Try to parse JSON from response
+        import json
+        try:
+            # Extract JSON from response text
+            if '{' in response_text and '}' in response_text:
+                json_start = response_text.find('{')
+                json_end = response_text.rfind('}') + 1
+                json_str = response_text[json_start:json_end]
+                parsed = json.loads(json_str)
+                
+                print(f'[AssemblyAI] ✅ Generated summary and action items')
+                print(f'[AssemblyAI] Summary length: {len(parsed.get("summary", ""))} chars')
+                print(f'[AssemblyAI] Action items: {len(parsed.get("action_items", []))} items')
+                return parsed
+        except json.JSONDecodeError:
+            # If JSON parsing fails, extract summary and action items manually
+            print(f'[AssemblyAI] ⚠ Could not parse JSON, extracting manually')
+            # Fallback: return response text as summary
+            return {
+                "summary": response_text,
+                "action_items": []
+            }
+            
+    except requests.exceptions.RequestException as e:
+        print(f'[AssemblyAI] ❌ ERROR: Failed to generate summary: {e}')
+        return None

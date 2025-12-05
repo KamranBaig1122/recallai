@@ -109,66 +109,92 @@ def recall_calendar_updates(request):
             connections['default'].close()
             # Continue processing even if webhook save fails
         
-        # Process webhook events per Recall AI documentation
-        if event == 'calendar.update':
-            # calendar.update: Calendar data changed (e.g., status becomes disconnected)
-            # Action: Re-fetch calendar via Retrieve Calendar endpoint
-            recall_service = get_service()
-            try:
-                updated_calendar_data = recall_service.get_calendar(calendar.recall_id)
-                calendar.recall_data = updated_calendar_data
-                calendar.save()
-                print(f'INFO: Updated calendar {calendar.id} with latest Recall data')
-                print(f'INFO: Calendar status: {updated_calendar_data.get("status", "unknown")}')
-            except Exception as e:
-                print(f'ERROR: Failed to update calendar: {e}')
-                import traceback
-                traceback.print_exc()
+        # Process webhook events in background to avoid blocking webhook response
+        # This prevents the "took too long to shut down" warning
+        import threading
         
-        elif event == 'calendar.sync_events':
-            # calendar.sync_events: Events created, updated, or deleted
-            # Action: Fetch events with updated_at__gte = last_updated_ts
-            # Use is_deleted field to determine if event was removed
-            last_updated_ts = payload.get('last_updated_ts')
-            print(f'INFO: Processing calendar.sync_events for calendar {calendar.id} with timestamp: {last_updated_ts}')
+        def process_webhook_in_background():
             try:
-                result = sync_calendar_events(calendar, last_updated_timestamp=last_updated_ts)
-                if result.get('success'):
-                    print(f'INFO: Successfully synced events for calendar {calendar.id}: {result.get("upserted", 0)} upserted, {result.get("deleted", 0)} deleted')
-                    
-                    # Broadcast update to WebSocket clients for this user
+                # Re-fetch calendar in background thread (fresh connection)
+                from app.models import Calendar
+                calendar = Calendar.objects.get(recall_id=recall_id)
+                
+                # Process webhook events per Recall AI documentation
+                if event == 'calendar.update':
+                    # calendar.update: Calendar data changed (e.g., status becomes disconnected)
+                    # Action: Re-fetch calendar via Retrieve Calendar endpoint
+                    recall_service = get_service()
                     try:
-                        from channels.layers import get_channel_layer
-                        from asgiref.sync import async_to_sync
-                        channel_layer = get_channel_layer()
-                        if channel_layer:
-                            group_name = f'calendar_updates_{calendar.user_id}'
-                            async_to_sync(channel_layer.group_send)(
-                                group_name,
-                                {
-                                    'type': 'calendar_update',
-                                    'message': {
-                                        'calendar_id': str(calendar.id),
-                                        'event': 'sync_events',
-                                        'upserted': result.get('upserted', 0),
-                                        'deleted': result.get('deleted', 0),
-                                        'timestamp': last_updated_ts,
-                                    }
-                                }
-                            )
-                            print(f'INFO: Broadcasted calendar update to WebSocket group {group_name}')
-                    except Exception as ws_error:
-                        print(f'WARNING: Failed to broadcast WebSocket update: {ws_error}')
+                        updated_calendar_data = recall_service.get_calendar(calendar.recall_id)
+                        calendar.recall_data = updated_calendar_data
+                        calendar.save()
+                        print(f'INFO: Updated calendar {calendar.id} with latest Recall data')
+                        print(f'INFO: Calendar status: {updated_calendar_data.get("status", "unknown")}')
+                    except Exception as e:
+                        print(f'ERROR: Failed to update calendar: {e}')
+                        import traceback
+                        traceback.print_exc()
+                
+                elif event == 'calendar.sync_events':
+                    # calendar.sync_events: Events created, updated, or deleted
+                    # Action: Fetch events with updated_at__gte = last_updated_ts
+                    # Use is_deleted field to determine if event was removed
+                    last_updated_ts = payload.get('last_updated_ts')
+                    print(f'INFO: Processing calendar.sync_events for calendar {calendar.id} with timestamp: {last_updated_ts}')
+                    try:
+                        result = sync_calendar_events(calendar, last_updated_timestamp=last_updated_ts)
+                        if result.get('success'):
+                            print(f'INFO: Successfully synced events for calendar {calendar.id}: {result.get("upserted", 0)} upserted, {result.get("deleted", 0)} deleted')
+                            
+                            # Broadcast update to WebSocket clients for this user
+                            try:
+                                from channels.layers import get_channel_layer
+                                from asgiref.sync import async_to_sync
+                                channel_layer = get_channel_layer()
+                                if channel_layer:
+                                    group_name = f'calendar_updates_{calendar.user_id}'
+                                    async_to_sync(channel_layer.group_send)(
+                                        group_name,
+                                        {
+                                            'type': 'calendar_update',
+                                            'message': {
+                                                'calendar_id': str(calendar.id),
+                                                'event': 'sync_events',
+                                                'upserted': result.get('upserted', 0),
+                                                'deleted': result.get('deleted', 0),
+                                                'timestamp': last_updated_ts,
+                                            }
+                                        }
+                                    )
+                                    print(f'INFO: Broadcasted calendar update to WebSocket group {group_name}')
+                            except Exception as ws_error:
+                                print(f'WARNING: Failed to broadcast WebSocket update: {ws_error}')
+                                import traceback
+                                traceback.print_exc()
+                        else:
+                            print(f'ERROR: Sync failed for calendar {calendar.id}: {result.get("error", "Unknown error")}')
+                    except Exception as e:
+                        print(f'ERROR: Failed to sync events: {e}')
                         import traceback
                         traceback.print_exc()
                 else:
-                    print(f'ERROR: Sync failed for calendar {calendar.id}: {result.get("error", "Unknown error")}')
+                    print(f'WARNING: Unknown event type "{event}". Ignoring.')
+                
+                # Close database connection after processing
+                try:
+                    from django.db import connections
+                    connections['default'].close()
+                except:
+                    pass
             except Exception as e:
-                print(f'ERROR: Failed to sync events: {e}')
+                print(f'ERROR: Failed to process webhook in background: {e}')
                 import traceback
                 traceback.print_exc()
-        else:
-            print(f'WARNING: Unknown event type "{event}". Ignoring.')
+        
+        # Start background thread and return immediately
+        thread = threading.Thread(target=process_webhook_in_background)
+        thread.daemon = True
+        thread.start()
         
         # Close database connection before returning to free up pool
         try:
@@ -177,6 +203,7 @@ def recall_calendar_updates(request):
         except:
             pass
         
+        # Return immediately - processing happens in background
         return HttpResponse(status=200)
     except json.JSONDecodeError as e:
         print(f'ERROR: Invalid JSON in webhook body: {e}')
