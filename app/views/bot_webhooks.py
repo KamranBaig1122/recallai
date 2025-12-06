@@ -234,7 +234,7 @@ def bot_webhook(request, bot_id=None):
             if len(details) > 500:
                 details = details[:500] + "…"
             print(f'[bot-wh] {event} ts={timestamp} who={participant_name} details={details}')
-            
+        
             # If participant leaves and it's the last participant, check if bot is done
             if event == "participant_events.leave" and bot_id:
                 # Check if we should trigger transcript fetch (fallback if bot.done never comes)
@@ -741,7 +741,7 @@ def bot_webhook(request, bot_id=None):
                                                         print(f'[bot-wh] [BACKGROUND] ⚠ Transcript not ready yet, will be processed later')
                                             else:
                                                 print(f'[bot-wh] [BACKGROUND] ⚠ No audio URL found, cannot generate summary/action_items')
-                                                print(f'[bot-wh] [BACKGROUND] This might mean AssemblyAI was not configured for this bot')
+                                            print(f'[bot-wh] [BACKGROUND] This might mean AssemblyAI was not configured for this bot')
                                     else:
                                         print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: Could not fetch bot data for transcript extraction')
                                 except Exception as e:
