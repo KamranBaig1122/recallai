@@ -7,6 +7,23 @@ from django.views.decorators.csrf import csrf_exempt
 import json
 import os
 
+# Import transcript fetcher functions at module level to avoid import errors in background threads
+try:
+    from app.services.assemblyai.transcript_fetcher import (
+        get_assemblyai_transcript,
+        extract_assemblyai_transcript_id
+    )
+except ImportError as e:
+    print(f'[bot-wh] ⚠ WARNING: Could not import transcript_fetcher functions: {e}')
+    print(f'[bot-wh] Some features may not work correctly. Please check transcript_fetcher.py exists.')
+    # Define stubs to prevent crashes
+    def get_assemblyai_transcript(*args, **kwargs):
+        print('[bot-wh] ERROR: get_assemblyai_transcript not available')
+        return None
+    def extract_assemblyai_transcript_id(*args, **kwargs):
+        print('[bot-wh] ERROR: extract_assemblyai_transcript_id not available')
+        return None
+
 
 @csrf_exempt
 def bot_webhook(request, bot_id=None):
@@ -221,6 +238,75 @@ def bot_webhook(request, bot_id=None):
                                     transcription.save()
                                     print(f'[bot-wh] [TRANSCRIPT] ✓ Updated transcript in database (now {len(utterances)} utterances)')
                                     print(f'[bot-wh] [TRANSCRIPT]   Database record updated successfully')
+                                    
+                                    # If this is a FINAL transcript, trigger a delayed check to generate summary/action items
+                                    # This is a fallback if bot.done event never comes
+                                    if event == "transcript.data":  # FINAL transcript
+                                        print(f'[bot-wh] [TRANSCRIPT] Final transcript received, will check for summary generation after delay...')
+                                        import threading
+                                        
+                                        def delayed_summary_check():
+                                            import time
+                                            # Wait 30 seconds after last transcript to see if meeting has ended
+                                            time.sleep(30)
+                                            
+                                            try:
+                                                from app.models import MeetingTranscription, CalendarEvent
+                                                from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
+                                                from app.logic.bot_retriever import auto_retrieve_bot
+                                                
+                                                # Re-fetch transcription to check if summary already exists
+                                                transcription_check = MeetingTranscription.objects.filter(
+                                                    calendar_event_id=calendar_event.id,
+                                                    bot_id=bot_id
+                                                ).first()
+                                                
+                                                if transcription_check:
+                                                    # Only generate if summary doesn't exist yet
+                                                    if not transcription_check.summary or len(transcription_check.summary.strip()) == 0:
+                                                        print(f'[bot-wh] [DELAYED CHECK] No summary found, generating with Groq...')
+                                                        
+                                                        if transcription_check.transcript_text and len(transcription_check.transcript_text.strip()) > 0:
+                                                            calendar_event_id = str(calendar_event.id)
+                                                            
+                                                            # Auto-retrieve bot first
+                                                            auto_retrieve_bot(bot_id, calendar_event_id)
+                                                            
+                                                            # Generate summary and action items
+                                                            groq_result = generate_summary_and_action_items_with_groq(transcription_check.transcript_text)
+                                                            
+                                                            if groq_result:
+                                                                summary = groq_result.get("summary", "")
+                                                                action_items = groq_result.get("action_items", [])
+                                                                
+                                                                transcript_data = transcription_check.transcript_data.copy() if transcription_check.transcript_data else {}
+                                                                transcript_data['summary'] = summary
+                                                                transcript_data['action_items'] = action_items
+                                                                
+                                                                transcription_check.summary = summary
+                                                                transcription_check.action_items = action_items
+                                                                transcription_check.status = 'completed'
+                                                                transcription_check.transcript_data = transcript_data
+                                                                transcription_check.save()
+                                                                
+                                                                print(f'[bot-wh] [DELAYED CHECK] ✓ Generated and saved summary ({len(summary)} chars) and {len(action_items)} action items')
+                                                                print(f'[bot-wh] [DELAYED CHECK] ==========================================')
+                                                                print(f'[bot-wh] [DELAYED CHECK] ✅ TRANSCRIPTION PROCESSING COMPLETE (via delayed check)')
+                                                                print(f'[bot-wh] [DELAYED CHECK] ==========================================')
+                                                            else:
+                                                                print(f'[bot-wh] [DELAYED CHECK] ⚠ Failed to generate summary with Groq')
+                                                        else:
+                                                            print(f'[bot-wh] [DELAYED CHECK] ⚠ No transcript text available for summary generation')
+                                                    else:
+                                                        print(f'[bot-wh] [DELAYED CHECK] ℹ Summary already exists (possibly generated by bot.done), skipping')
+                                            except Exception as e:
+                                                print(f'[bot-wh] [DELAYED CHECK] Error in delayed summary check: {e}')
+                                                import traceback
+                                                traceback.print_exc()
+                                        
+                                        thread = threading.Thread(target=delayed_summary_check)
+                                        thread.daemon = True
+                                        thread.start()
                                 else:
                                     print(f'[bot-wh] [TRANSCRIPT] ⚠ Duplicate utterance skipped (already in database)')
                 except Exception as e:
@@ -274,12 +360,7 @@ def bot_webhook(request, bot_id=None):
                                     # Trigger the same processing as bot.done webhook
                                     from app.logic.bot_retriever import auto_retrieve_bot
                                     from app.models import CalendarEvent
-                                    from app.services.assemblyai.transcript_fetcher import (
-                                        get_assemblyai_transcript,
-                                        extract_assemblyai_transcript_id,
-                                        get_audio_url_from_bot,
-                                        submit_audio_for_transcription_with_summary
-                                    )
+                                    # Functions are already imported at module level
                                     from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
                                     
                                     # Find calendar event
@@ -297,139 +378,65 @@ def bot_webhook(request, bot_id=None):
                                         calendar_event_id = str(calendar_event.id)
                                         result = auto_retrieve_bot(bot_id, calendar_event_id)
                                         if result.get('success'):
-                                            print(f'[bot-wh] [FALLBACK] Auto-retrieve successful, fetching fresh bot data...')
-                                            # Get fresh bot data after auto-retrieve (bot_json from outer scope might be stale)
-                                            fresh_bot_json = recall_service.get_bot(bot_id)
-                                            if fresh_bot_json:
-                                                bot_json = fresh_bot_json
-                                                print(f'[bot-wh] [FALLBACK] Got fresh bot data')
+                                            print(f'[bot-wh] [FALLBACK] Auto-retrieve successful')
                                             
-                                            print(f'[bot-wh] [FALLBACK] Extracting transcript ID from bot data...')
-                                            print(f'[bot-wh] [FALLBACK] Bot data keys: {list(bot_json.keys()) if bot_json else "None"}')
-                                            transcript_id = extract_assemblyai_transcript_id(bot_json)
-                                            assemblyai_transcript = None
+                                            # Get transcript text from database (saved during real-time meeting)
+                                            from app.models import MeetingTranscription
+                                            existing_transcription = MeetingTranscription.objects.filter(
+                                                calendar_event_id=calendar_event.id,
+                                                bot_id=bot_id
+                                            ).first()
                                             
-                                            if transcript_id:
-                                                print(f'[bot-wh] [FALLBACK] ✓ Found transcript ID: {transcript_id}')
-                                                print(f'[bot-wh] [FALLBACK] Fetching transcript from AssemblyAI...')
-                                                assemblyai_transcript = get_assemblyai_transcript(transcript_id)
+                                            if existing_transcription and existing_transcription.transcript_text:
+                                                transcript_text = existing_transcription.transcript_text
+                                                print(f'[bot-wh] [FALLBACK] Found transcript text in database ({len(transcript_text)} chars)')
+                                                print(f'[bot-wh] [FALLBACK] Generating summary/action_items with Groq API...')
                                                 
-                                                # If fetching failed (e.g., 400 error), the ID might be from Recall.ai, not AssemblyAI
-                                                if not assemblyai_transcript:
-                                                    print(f'[bot-wh] [FALLBACK] ⚠ WARNING: Failed to fetch transcript from AssemblyAI')
-                                                    print(f'[bot-wh] [FALLBACK] The ID might be from Recall.ai, not AssemblyAI')
-                                                    print(f'[bot-wh] [FALLBACK] Will use existing transcript text and generate summary/action_items with LeMUR')
-                                                    transcript_id = None  # Clear invalid ID
-                                                    assemblyai_transcript = None  # Ensure it's None
-                                            
-                                            # If no transcript ID or transcript doesn't have summary/action_items, try to generate them
-                                            needs_summary_or_action_items = (
-                                                not transcript_id or 
-                                                not assemblyai_transcript or
-                                                (assemblyai_transcript and (not assemblyai_transcript.get("summary") or not assemblyai_transcript.get("action_items")))
-                                            )
-                                            
-                                            if needs_summary_or_action_items:
-                                                print(f'[bot-wh] [FALLBACK] Attempting to get summary/action_items from audio file...')
-                                                audio_url = get_audio_url_from_bot(bot_json)
-                                                if audio_url:
-                                                    print(f'[bot-wh] [FALLBACK] Found audio URL, submitting to AssemblyAI with summarization...')
-                                                    new_transcript_id = submit_audio_for_transcription_with_summary(audio_url)
-                                                    if new_transcript_id:
-                                                        import time
-                                                        time.sleep(10)
-                                                        enhanced_transcript = get_assemblyai_transcript(new_transcript_id)
-                                                        if enhanced_transcript:
-                                                            if not assemblyai_transcript:
-                                                                assemblyai_transcript = enhanced_transcript
-                                                                transcript_id = new_transcript_id
-                                                            else:
-                                                                # Merge summary and action_items
-                                                                if enhanced_transcript.get("summary"):
-                                                                    assemblyai_transcript["summary"] = enhanced_transcript.get("summary")
-                                                                if enhanced_transcript.get("action_items"):
-                                                                    assemblyai_transcript["action_items"] = enhanced_transcript.get("action_items")
-                                                            print(f'[bot-wh] [FALLBACK] ✓ Got transcript with summary and action items')
+                                                # Generate summary and action items with Groq
+                                                groq_result = generate_summary_and_action_items_with_groq(transcript_text)
+                                                if groq_result:
+                                                    # Update transcription with Groq results
+                                                    summary = groq_result.get("summary", "")
+                                                    action_items = groq_result.get("action_items", [])
+                                                    
+                                                    # Preserve existing transcript data structure
+                                                    transcript_data = existing_transcription.transcript_data.copy() if existing_transcription.transcript_data else {}
+                                                    
+                                                    # Update or create transcription record
+                                                    if existing_transcription:
+                                                        existing_transcription.summary = summary
+                                                        existing_transcription.action_items = action_items
+                                                        existing_transcription.status = 'completed'
+                                                        transcript_data['summary'] = summary
+                                                        transcript_data['action_items'] = action_items
+                                                        existing_transcription.transcript_data = transcript_data
+                                                        existing_transcription.save()
+                                                        print(f'[bot-wh] [FALLBACK] ✓ Updated transcription with summary and action items')
+                                                    else:
+                                                        # Create new transcription record
+                                                        MeetingTranscription.objects.create(
+                                                            calendar_event_id=calendar_event.id,
+                                                            bot_id=bot_id,
+                                                            transcript_text=transcript_text,
+                                                            transcript_data={
+                                                                **transcript_data,
+                                                                'summary': summary,
+                                                                'action_items': action_items
+                                                            },
+                                                            summary=summary,
+                                                            action_items=action_items,
+                                                            status='completed'
+                                                        )
+                                                        print(f'[bot-wh] [FALLBACK] ✓ Created transcription with summary and action items')
+                                                    
+                                                    print(f'[bot-wh] [FALLBACK] Summary length: {len(summary)} chars')
+                                                    print(f'[bot-wh] [FALLBACK] Action items: {len(action_items)} items')
+                                                    print(f'[bot-wh] [FALLBACK] ✓ Transcript processing complete via fallback mechanism')
                                                 else:
-                                                    # Use existing transcript text from database and generate with Groq
-                                                    from app.models import MeetingTranscription
-                                                    existing_transcription = MeetingTranscription.objects.filter(
-                                                        calendar_event_id=calendar_event.id,
-                                                        bot_id=bot_id
-                                                    ).first()
-                                                    
-                                                    if existing_transcription and existing_transcription.transcript_text:
-                                                        transcript_text = existing_transcription.transcript_text
-                                                        print(f'[bot-wh] [FALLBACK] Using existing transcript text from database ({len(transcript_text)} chars)')
-                                                        print(f'[bot-wh] [FALLBACK] Generating summary/action_items with Groq API...')
-                                                        
-                                                        # Import Groq service
-                                                        from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
-                                                        
-                                                        groq_result = generate_summary_and_action_items_with_groq(transcript_text)
-                                                        if groq_result:
-                                                            if not assemblyai_transcript:
-                                                                # Create a minimal transcript structure
-                                                                assemblyai_transcript = {
-                                                                    "text": transcript_text,
-                                                                    "status": "completed"
-                                                                }
-                                                            if groq_result.get("summary"):
-                                                                assemblyai_transcript["summary"] = groq_result.get("summary")
-                                                            if groq_result.get("action_items"):
-                                                                assemblyai_transcript["action_items"] = groq_result.get("action_items")
-                                                            print(f'[bot-wh] [FALLBACK] ✓ Generated summary and action items using Groq')
-                                                        else:
-                                                            print(f'[bot-wh] [FALLBACK] ⚠ WARNING: Failed to generate summary/action_items with Groq')
-                                                    else:
-                                                        print(f'[bot-wh] [FALLBACK] ⚠ WARNING: No transcript text available in database')
-                                            
-                                            if assemblyai_transcript:
-                                                    # Save transcript (same logic as bot.done handler)
-                                                    from app.models import MeetingTranscription
-                                                    # Extract action items
-                                                    action_items = assemblyai_transcript.get('action_items', [])
-                                                    
-                                                    transcription, created = MeetingTranscription.objects.get_or_create(
-                                                        calendar_event_id=calendar_event.id,
-                                                        bot_id=bot_id,
-                                                        defaults={
-                                                            'assemblyai_transcript_id': transcript_id,
-                                                            'transcript_data': assemblyai_transcript,
-                                                            'transcript_text': assemblyai_transcript.get('text', ''),
-                                                            'summary': assemblyai_transcript.get('summary', ''),
-                                                            'action_items': action_items,
-                                                            'status': 'completed' if assemblyai_transcript.get('status') == 'completed' else 'processing',
-                                                            'language': assemblyai_transcript.get('language_code', 'en'),
-                                                            'duration': assemblyai_transcript.get('audio_duration', None),
-                                                        }
-                                                    )
-                                                    if not created:
-                                                        # Preserve existing utterances from real-time transcripts
-                                                        existing_utterances = transcription.transcript_data.get('utterances', [])
-                                                        existing_words = transcription.transcript_data.get('words', [])
-                                                        
-                                                        # Merge with new data, preserving utterances
-                                                        if existing_utterances:
-                                                            assemblyai_transcript['utterances'] = existing_utterances
-                                                        if existing_words:
-                                                            assemblyai_transcript['words'] = existing_words
-                                                        
-                                                        transcription.assemblyai_transcript_id = transcript_id
-                                                        transcription.transcript_data = assemblyai_transcript
-                                                        # Keep existing transcript_text if it's longer (from real-time)
-                                                        if transcription.transcript_text and len(transcription.transcript_text) > len(assemblyai_transcript.get('text', '')):
-                                                            pass  # Keep existing
-                                                        else:
-                                                            transcription.transcript_text = assemblyai_transcript.get('text', '') or transcription.transcript_text
-                                                        transcription.summary = assemblyai_transcript.get('summary', '') or transcription.summary
-                                                        transcription.action_items = action_items or transcription.action_items
-                                                        transcription.status = 'completed' if assemblyai_transcript.get('status') == 'completed' else 'processing'
-                                                        transcription.save()
-                                                        print(f'[bot-wh] [FALLBACK] ✓ Updated transcription (preserved {len(existing_utterances)} utterances)')
-                                                    else:
-                                                        print(f'[bot-wh] [FALLBACK] ✓ Created new transcription')
-                                                    print(f'[bot-wh] [FALLBACK] ✓ Transcript saved via fallback mechanism')
+                                                    print(f'[bot-wh] [FALLBACK] ⚠ WARNING: Failed to generate summary/action_items with Groq')
+                                            else:
+                                                print(f'[bot-wh] [FALLBACK] ⚠ WARNING: No transcript text found in database')
+                                                print(f'[bot-wh] [FALLBACK] Waiting for real-time transcripts to be saved...')
                         except Exception as e:
                             print(f'[bot-wh] [FALLBACK] Error checking bot status: {e}')
                             import traceback
@@ -464,16 +471,13 @@ def bot_webhook(request, bot_id=None):
                     print(f'[bot-wh] 🎯 BOT COMPLETED: {bot_id}')
                     print(f'[bot-wh] Status code: {code}')
                     print(f'[bot-wh] Timestamp: {timestamp}')
-                    print(f'[bot-wh] Triggering auto-retrieve and AssemblyAI transcript fetch...')
+                    print(f'[bot-wh] Triggering auto-retrieve and Groq summarization...')
                     print(f'[bot-wh] ==========================================')
                     try:
                         # Import here to avoid circular imports
                         from app.logic.bot_retriever import auto_retrieve_bot
                         from app.models import CalendarEvent
-                        from app.services.assemblyai.transcript_fetcher import (
-                            get_assemblyai_transcript,
-                            extract_assemblyai_transcript_id
-                        )
+                        from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
                         from app.services.recall.service import get_service
                         
                         # Find calendar event with this bot_id
@@ -483,7 +487,7 @@ def bot_webhook(request, bot_id=None):
                         
                         calendar_event_id = str(calendar_event.id) if calendar_event else None
                         
-                        # Trigger auto-retrieve and AssemblyAI transcript fetch (async/background)
+                        # Trigger auto-retrieve and Groq summarization (async/background)
                         # Use threading to avoid blocking webhook response
                         import threading
                         def retrieve_in_background():
@@ -496,256 +500,65 @@ def bot_webhook(request, bot_id=None):
                                 print(f'[bot-wh] [BACKGROUND] ✓ Auto-retrieved bot {bot_id}')
                                 print(f'[bot-wh] [BACKGROUND] Recording ID: {result.get("recording_id")}')
                                 
-                                # Now fetch AssemblyAI transcript
+                                # Get transcript from database and process with Groq
                                 try:
-                                    print(f'[bot-wh] [BACKGROUND] Step 2: Fetching bot data from Recall.ai...')
-                                    # Get fresh bot data to find transcript ID
-                                    recall_service = get_service()
-                                    bot_json = recall_service.get_bot(bot_id)
-                                    
-                                    if bot_json:
-                                        print(f'[bot-wh] [BACKGROUND] ✓ Retrieved bot data from Recall.ai')
-                                        print(f'[bot-wh] [BACKGROUND] Bot status: {bot_json.get("status", "unknown")}')
+                                    if calendar_event:
+                                        print(f'[bot-wh] [BACKGROUND] Step 2: Getting transcript from database...')
+                                        from app.models import MeetingTranscription
                                         
-                                        # Extract AssemblyAI transcript ID
-                                        print(f'[bot-wh] [BACKGROUND] Step 3: Extracting AssemblyAI transcript ID...')
-                                        transcript_id = extract_assemblyai_transcript_id(bot_json)
+                                        existing_transcription = MeetingTranscription.objects.filter(
+                                            calendar_event_id=calendar_event.id,
+                                            bot_id=bot_id
+                                        ).first()
                                         
-                                        if transcript_id:
-                                            print(f'[bot-wh] [BACKGROUND] ✓ Found AssemblyAI transcript ID: {transcript_id}')
-                                            print(f'[bot-wh] [BACKGROUND] Step 4: Fetching transcript from AssemblyAI...')
+                                        if existing_transcription and existing_transcription.transcript_text:
+                                            transcript_text = existing_transcription.transcript_text
+                                            print(f'[bot-wh] [BACKGROUND] ✓ Found transcript text ({len(transcript_text)} chars)')
                                             
-                                            # Fetch full transcript from AssemblyAI
-                                            assemblyai_transcript = get_assemblyai_transcript(transcript_id)
-                                            
-                                            if assemblyai_transcript:
-                                                print(f'[bot-wh] [BACKGROUND] ✓ Successfully fetched transcript from AssemblyAI')
-                                                print(f'[bot-wh] [BACKGROUND] Transcript status: {assemblyai_transcript.get("status", "unknown")}')
-                                                print(f'[bot-wh] [BACKGROUND] Transcript text length: {len(assemblyai_transcript.get("text", ""))} chars')
-                                                print(f'[bot-wh] [BACKGROUND] Has summary: {bool(assemblyai_transcript.get("summary"))}')
-                                                print(f'[bot-wh] [BACKGROUND] Has action items: {bool(assemblyai_transcript.get("action_items"))}')
-                                                
-                                                # Check if summary/action_items are missing - if so, try to generate them
-                                                has_summary = bool(assemblyai_transcript.get("summary"))
-                                                has_action_items = bool(assemblyai_transcript.get("action_items"))
-                                                
-                                                if not has_summary or not has_action_items:
-                                                    print(f'[bot-wh] [BACKGROUND] ⚠ Summary or action items missing, attempting to generate...')
-                                                    
-                                                    # Try to get audio URL and submit for transcription with summary/action_items
-                                                    audio_url = get_audio_url_from_bot(bot_json)
-                                                    if audio_url:
-                                                        print(f'[bot-wh] [BACKGROUND] Found audio URL, submitting to AssemblyAI with summarization...')
-                                                        new_transcript_id = submit_audio_for_transcription_with_summary(audio_url)
-                                                        if new_transcript_id:
-                                                            print(f'[bot-wh] [BACKGROUND] Audio submitted, fetching transcript with summary/action_items...')
-                                                            # Wait a bit for processing
-                                                            import time
-                                                            time.sleep(5)
-                                                            enhanced_transcript = get_assemblyai_transcript(new_transcript_id)
-                                                            if enhanced_transcript:
-                                                                # Merge summary and action_items if available
-                                                                if enhanced_transcript.get("summary") and not has_summary:
-                                                                    assemblyai_transcript["summary"] = enhanced_transcript.get("summary")
-                                                                    print(f'[bot-wh] [BACKGROUND] ✓ Added summary from enhanced transcript')
-                                                                if enhanced_transcript.get("action_items") and not has_action_items:
-                                                                    assemblyai_transcript["action_items"] = enhanced_transcript.get("action_items")
-                                                                    print(f'[bot-wh] [BACKGROUND] ✓ Added action items from enhanced transcript')
-                                                    else:
-                                                        # Fallback: Use Groq API to generate from transcript text
-                                                        print(f'[bot-wh] [BACKGROUND] No audio URL, using Groq API to generate summary/action_items...')
-                                                        transcript_text = assemblyai_transcript.get("text", "")
-                                                        if not transcript_text:
-                                                            # Get from database if not in transcript
-                                                            from app.models import MeetingTranscription
-                                                            existing_transcription = MeetingTranscription.objects.filter(
-                                                                calendar_event_id=calendar_event.id,
-                                                                bot_id=bot_id
-                                                            ).first()
-                                                            if existing_transcription and existing_transcription.transcript_text:
-                                                                transcript_text = existing_transcription.transcript_text
-                                                        
-                                                        if transcript_text:
-                                                            from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
-                                                            groq_result = generate_summary_and_action_items_with_groq(transcript_text)
-                                                            if groq_result:
-                                                                if groq_result.get("summary") and not has_summary:
-                                                                    assemblyai_transcript["summary"] = groq_result.get("summary")
-                                                                    print(f'[bot-wh] [BACKGROUND] ✓ Generated summary using Groq')
-                                                                if groq_result.get("action_items") and not has_action_items:
-                                                                    assemblyai_transcript["action_items"] = groq_result.get("action_items")
-                                                                    print(f'[bot-wh] [BACKGROUND] ✓ Generated action items using Groq')
-                                                
-                                                print(f'[bot-wh] [BACKGROUND] Utterances count: {len(assemblyai_transcript.get("utterances", []))}')
-                                                print(f'[bot-wh] [BACKGROUND] Words count: {len(assemblyai_transcript.get("words", []))}')
-                                                # Save transcript to database
-                                                from app.models import BotRecording, MeetingTranscription
-                                                
-                                                print(f'[bot-wh] [BACKGROUND] Step 5: Saving transcript to database...')
-                                                
-                                                # Save to BotRecording (existing)
-                                                bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
-                                                
-                                                if bot_recording:
-                                                    print(f'[bot-wh] [BACKGROUND] Saving to BotRecording table...')
-                                                    recall_data = bot_recording.recall_data.copy()
-                                                    recall_data['assemblyai_transcript'] = assemblyai_transcript
-                                                    recall_data['assemblyai_transcript_id'] = transcript_id
-                                                    bot_recording.recall_data = recall_data
-                                                    bot_recording.save()
-                                                    print(f'[bot-wh] [BACKGROUND] ✓ Saved AssemblyAI transcript to BotRecording (ID: {bot_recording.id})')
-                                                else:
-                                                    print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: BotRecording not found for bot {bot_id}')
-                                                
-                                                # Save to MeetingTranscription (new dedicated table)
-                                                if calendar_event:
-                                                    print(f'[bot-wh] [BACKGROUND] Saving to MeetingTranscription table...')
-                                                    print(f'[bot-wh] [BACKGROUND] Calendar Event ID: {calendar_event.id}')
-                                                    print(f'[bot-wh] [BACKGROUND] Event Title: {calendar_event.title or "Untitled"}')
-                                                    
-                                                    # Get or create MeetingTranscription (one per bot per event)
-                                                    # Use calendar_event_id + bot_id as unique key (not assemblyai_transcript_id)
-                                                    # Extract action items from AssemblyAI transcript
-                                                    action_items = assemblyai_transcript.get('action_items', [])
-                                                    
-                                                    transcription, created = MeetingTranscription.objects.get_or_create(
-                                                        calendar_event_id=calendar_event.id,
-                                                        bot_id=bot_id,
-                                                        defaults={
-                                                            'assemblyai_transcript_id': transcript_id,
-                                                            'transcript_data': assemblyai_transcript,
-                                                            'transcript_text': assemblyai_transcript.get('text', ''),
-                                                            'summary': assemblyai_transcript.get('summary', ''),
-                                                            'action_items': action_items,
-                                                            'status': 'completed' if assemblyai_transcript.get('status') == 'completed' else 'processing',
-                                                            'language': assemblyai_transcript.get('language_code', 'en'),
-                                                            'duration': assemblyai_transcript.get('audio_duration', None),
-                                                        }
-                                                    )
-                                                    
-                                                    if created:
-                                                        print(f'[bot-wh] [BACKGROUND] ✓ Created new MeetingTranscription (ID: {transcription.id})')
-                                                    else:
-                                                        print(f'[bot-wh] [BACKGROUND] Updating existing MeetingTranscription (ID: {transcription.id})')
-                                                        # Preserve existing utterances from real-time transcripts
-                                                        existing_utterances = transcription.transcript_data.get('utterances', [])
-                                                        existing_words = transcription.transcript_data.get('words', [])
-                                                        
-                                                        # Merge with new data, preserving utterances
-                                                        if existing_utterances:
-                                                            assemblyai_transcript['utterances'] = existing_utterances
-                                                        if existing_words:
-                                                            assemblyai_transcript['words'] = existing_words
-                                                        
-                                                        # Update existing transcription with final data from AssemblyAI
-                                                        transcription.assemblyai_transcript_id = transcript_id
-                                                        transcription.transcript_data = assemblyai_transcript
-                                                        # Keep existing transcript_text if it's longer (from real-time)
-                                                        if transcription.transcript_text and len(transcription.transcript_text) > len(assemblyai_transcript.get('text', '')):
-                                                            pass  # Keep existing
-                                                        else:
-                                                            transcription.transcript_text = assemblyai_transcript.get('text', '') or transcription.transcript_text
-                                                        transcription.summary = assemblyai_transcript.get('summary', '') or transcription.summary
-                                                        transcription.action_items = action_items or transcription.action_items
-                                                        transcription.status = 'completed' if assemblyai_transcript.get('status') == 'completed' else 'processing'
-                                                        transcription.language = assemblyai_transcript.get('language_code', 'en') or transcription.language
-                                                        transcription.duration = assemblyai_transcript.get('audio_duration', None) or transcription.duration
-                                                        transcription.save()
-                                                        print(f'[bot-wh] [BACKGROUND] ✓ Updated MeetingTranscription with final transcript (preserved {len(existing_utterances)} utterances)')
-                                                    
-                                                    print(f'[bot-wh] [BACKGROUND] Transcription saved with:')
-                                                    print(f'[bot-wh] [BACKGROUND]   - Text length: {len(transcription.transcript_text or "")} chars')
-                                                    print(f'[bot-wh] [BACKGROUND]   - Summary length: {len(transcription.summary or "")} chars')
-                                                    print(f'[bot-wh] [BACKGROUND]   - Action items: {len(action_items)} items')
-                                                    print(f'[bot-wh] [BACKGROUND]   - Status: {transcription.status}')
-                                                    print(f'[bot-wh] [BACKGROUND]   - Language: {transcription.language}')
-                                                    print(f'[bot-wh] [BACKGROUND]   - Duration: {transcription.duration}s')
-                                                    print(f'[bot-wh] [BACKGROUND] ==========================================')
-                                                    print(f'[bot-wh] [BACKGROUND] ✅ TRANSCRIPTION PROCESSING COMPLETE')
-                                                    print(f'[bot-wh] [BACKGROUND] ==========================================')
-                                                else:
-                                                    print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: Calendar event not found for bot {bot_id}')
-                                                    print(f'[bot-wh] [BACKGROUND] Calendar Event ID was: {calendar_event_id}')
+                                            # Check if summary already exists (might have been generated by delayed check)
+                                            if existing_transcription.summary and len(existing_transcription.summary.strip()) > 0:
+                                                print(f'[bot-wh] [BACKGROUND] ℹ Summary already exists, skipping Groq generation')
+                                                print(f'[bot-wh] [BACKGROUND] Summary length: {len(existing_transcription.summary)} chars')
+                                                print(f'[bot-wh] [BACKGROUND] Action items: {len(existing_transcription.action_items)} items')
+                                                print(f'[bot-wh] [BACKGROUND] ==========================================')
+                                                print(f'[bot-wh] [BACKGROUND] ✅ TRANSCRIPTION ALREADY PROCESSED')
+                                                print(f'[bot-wh] [BACKGROUND] ==========================================')
                                             else:
-                                                print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: Failed to fetch AssemblyAI transcript')
-                                                print(f'[bot-wh] [BACKGROUND] Transcript ID was: {transcript_id}')
+                                                print(f'[bot-wh] [BACKGROUND] Step 3: Generating summary/action_items with Groq...')
+                                                groq_result = generate_summary_and_action_items_with_groq(transcript_text)
+                                                
+                                                if groq_result:
+                                                    summary = groq_result.get("summary", "")
+                                                    action_items = groq_result.get("action_items", [])
+                                                    
+                                                    print(f'[bot-wh] [BACKGROUND] ✓ Generated summary ({len(summary)} chars) and {len(action_items)} action items')
+                                                    
+                                                    # Update transcription record
+                                                    transcript_data = existing_transcription.transcript_data.copy() if existing_transcription.transcript_data else {}
+                                                    transcript_data['summary'] = summary
+                                                    transcript_data['action_items'] = action_items
+                                                    
+                                                    existing_transcription.summary = summary
+                                                    existing_transcription.action_items = action_items
+                                                    existing_transcription.status = 'completed'
+                                                    existing_transcription.transcript_data = transcript_data
+                                                    existing_transcription.save()
+                                                    
+                                                    print(f'[bot-wh] [BACKGROUND] ✓ Saved transcription with summary and action items')
+                                                    print(f'[bot-wh] [BACKGROUND] ==========================================')
+                                                    print(f'[bot-wh] [BACKGROUND] ✅ TRANSCRIPTION PROCESSING COMPLETE (via bot.done)')
+                                                    print(f'[bot-wh] [BACKGROUND] ==========================================')
+                                                else:
+                                                    print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: Failed to generate summary/action_items with Groq')
                                         else:
-                                            print(f'[bot-wh] [BACKGROUND] ℹ INFO: No AssemblyAI transcript ID found in bot data')
-                                            print(f'[bot-wh] [BACKGROUND] Attempting to get summary/action_items from audio file...')
-                                            
-                                            # Try to get audio URL and submit for transcription with summary/action_items
-                                            audio_url = get_audio_url_from_bot(bot_json)
-                                            if audio_url:
-                                                print(f'[bot-wh] [BACKGROUND] Found audio URL, submitting to AssemblyAI...')
-                                                new_transcript_id = submit_audio_for_transcription_with_summary(audio_url)
-                                                if new_transcript_id:
-                                                    print(f'[bot-wh] [BACKGROUND] Audio submitted, waiting for processing...')
-                                                    # Wait for processing
-                                                    import time
-                                                    time.sleep(10)  # Wait 10 seconds
-                                                    
-                                                    # Fetch the transcript with summary and action items
-                                                    enhanced_transcript = get_assemblyai_transcript(new_transcript_id)
-                                                    if enhanced_transcript:
-                                                        print(f'[bot-wh] [BACKGROUND] ✓ Got transcript with summary and action items')
-                                                        # Use this transcript instead
-                                                        assemblyai_transcript = enhanced_transcript
-                                                        transcript_id = new_transcript_id
-                                                        
-                                                        # Save to database (same logic as above)
-                                                        from app.models import BotRecording, MeetingTranscription
-                                                        action_items = assemblyai_transcript.get('action_items', [])
-                                                        
-                                                        if calendar_event:
-                                                            transcription, created = MeetingTranscription.objects.get_or_create(
-                                                                calendar_event_id=calendar_event.id,
-                                                                bot_id=bot_id,
-                                                                defaults={
-                                                                    'assemblyai_transcript_id': transcript_id,
-                                                                    'transcript_data': assemblyai_transcript,
-                                                                    'transcript_text': assemblyai_transcript.get('text', ''),
-                                                                    'summary': assemblyai_transcript.get('summary', ''),
-                                                                    'action_items': action_items,
-                                                                    'status': 'completed',
-                                                                    'language': assemblyai_transcript.get('language_code', 'en'),
-                                                                    'duration': assemblyai_transcript.get('audio_duration', None),
-                                                                }
-                                                            )
-                                                            if not created:
-                                                                # Preserve existing utterances from real-time transcripts
-                                                                existing_utterances = transcription.transcript_data.get('utterances', [])
-                                                                existing_words = transcription.transcript_data.get('words', [])
-                                                                
-                                                                # Merge with new data, preserving utterances
-                                                                if existing_utterances:
-                                                                    assemblyai_transcript['utterances'] = existing_utterances
-                                                                if existing_words:
-                                                                    assemblyai_transcript['words'] = existing_words
-                                                                
-                                                                transcription.assemblyai_transcript_id = transcript_id
-                                                                transcription.transcript_data = assemblyai_transcript
-                                                                # Keep existing transcript_text if it's longer
-                                                                if transcription.transcript_text and len(transcription.transcript_text) > len(assemblyai_transcript.get('text', '')):
-                                                                    pass  # Keep existing
-                                                                else:
-                                                                    transcription.transcript_text = assemblyai_transcript.get('text', '') or transcription.transcript_text
-                                                                transcription.summary = assemblyai_transcript.get('summary', '') or transcription.summary
-                                                                transcription.action_items = action_items or transcription.action_items
-                                                                transcription.status = 'completed'
-                                                                transcription.save()
-                                                                print(f'[bot-wh] [BACKGROUND] ✓ Updated transcript (preserved {len(existing_utterances)} utterances)')
-                                                            else:
-                                                                print(f'[bot-wh] [BACKGROUND] ✓ Created new transcript')
-                                                            print(f'[bot-wh] [BACKGROUND] ✓ Saved transcript with summary and action items')
-                                                    else:
-                                                        print(f'[bot-wh] [BACKGROUND] ⚠ Transcript not ready yet, will be processed later')
-                                            else:
-                                                print(f'[bot-wh] [BACKGROUND] ⚠ No audio URL found, cannot generate summary/action_items')
-                                            print(f'[bot-wh] [BACKGROUND] This might mean AssemblyAI was not configured for this bot')
+                                            print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: No transcript text found in database')
+                                            print(f'[bot-wh] [BACKGROUND] Real-time transcripts may not have been saved yet')
+                                    
+
                                     else:
-                                        print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: Could not fetch bot data for transcript extraction')
+                                        print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: Calendar event not found for bot {bot_id}')
                                 except Exception as e:
-                                    print(f'[bot-wh] [BACKGROUND] ❌ ERROR: Failed to fetch AssemblyAI transcript: {e}')
+                                    print(f'[bot-wh] [BACKGROUND] ❌ ERROR: Failed to process transcript: {e}')
                                     import traceback
                                     traceback.print_exc()
                             else:
@@ -813,48 +626,36 @@ def bot_webhook(request, bot_id=None):
                                             if transcript_id:
                                                 assemblyai_transcript = get_assemblyai_transcript(transcript_id)
                                             
-                                            # If no transcript ID or missing summary/action_items, try to generate them
+                                            # If no transcript ID or missing summary/action_items, generate them with Groq
                                             if not transcript_id or (assemblyai_transcript and (not assemblyai_transcript.get("summary") or not assemblyai_transcript.get("action_items"))):
-                                                audio_url = get_audio_url_from_bot(bot_json)
-                                                if audio_url:
-                                                    new_transcript_id = submit_audio_for_transcription_with_summary(audio_url)
-                                                    if new_transcript_id:
-                                                        import time
-                                                        time.sleep(10)
-                                                        enhanced = get_assemblyai_transcript(new_transcript_id)
-                                                        if enhanced:
-                                                            if not assemblyai_transcript:
-                                                                assemblyai_transcript = enhanced
-                                                                transcript_id = new_transcript_id
-                                                            else:
-                                                                if enhanced.get("summary"):
-                                                                    assemblyai_transcript["summary"] = enhanced.get("summary")
-                                                                if enhanced.get("action_items"):
-                                                                    assemblyai_transcript["action_items"] = enhanced.get("action_items")
+                                                # Get transcript text and generate with Groq
+                                                transcript_text = assemblyai_transcript.get("text", "") if assemblyai_transcript else ""
+                                                if not transcript_text:
+                                                    # Get from database if not in transcript
+                                                    from app.models import MeetingTranscription
+                                                    existing_transcription = MeetingTranscription.objects.filter(
+                                                        calendar_event_id=calendar_event.id,
+                                                        bot_id=bot_id
+                                                    ).first()
+                                                    if existing_transcription and existing_transcription.transcript_text:
+                                                        transcript_text = existing_transcription.transcript_text
+                                                
+                                                if transcript_text:
+                                                    print(f'[bot-wh] Using transcript text ({len(transcript_text)} chars), generating summary/action_items with Groq...')
+                                                    from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
+                                                    groq_result = generate_summary_and_action_items_with_groq(transcript_text)
+                                                    if groq_result:
+                                                        if not assemblyai_transcript:
+                                                            assemblyai_transcript = {"text": transcript_text, "status": "completed"}
+                                                        if groq_result.get("summary"):
+                                                            assemblyai_transcript["summary"] = groq_result.get("summary")
+                                                        if groq_result.get("action_items"):
+                                                            assemblyai_transcript["action_items"] = groq_result.get("action_items")
+                                                        print(f'[bot-wh] ✓ Generated summary and action items using Groq')
+                                                    else:
+                                                        print(f'[bot-wh] ⚠ WARNING: Failed to generate summary/action_items with Groq')
                                                 else:
-                                                    # Use Groq API to generate from transcript text
-                                                    transcript_text = assemblyai_transcript.get("text", "") if assemblyai_transcript else ""
-                                                    if not transcript_text:
-                                                        # Get from database if not in transcript
-                                                        from app.models import MeetingTranscription
-                                                        existing_transcription = MeetingTranscription.objects.filter(
-                                                            calendar_event_id=calendar_event.id,
-                                                            bot_id=bot_id
-                                                        ).first()
-                                                        if existing_transcription and existing_transcription.transcript_text:
-                                                            transcript_text = existing_transcription.transcript_text
-                                                    
-                                                    if transcript_text:
-                                                        from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
-                                                        groq_result = generate_summary_and_action_items_with_groq(transcript_text)
-                                                        if groq_result:
-                                                            if not assemblyai_transcript:
-                                                                assemblyai_transcript = {"text": transcript_text, "status": "completed"}
-                                                            if groq_result.get("summary"):
-                                                                assemblyai_transcript["summary"] = groq_result.get("summary")
-                                                            if groq_result.get("action_items"):
-                                                                assemblyai_transcript["action_items"] = groq_result.get("action_items")
-                                                            print(f'[bot-wh] ✓ Generated summary and action items using Groq')
+                                                    print(f'[bot-wh] ⚠ WARNING: No transcript text available for Groq processing')
                                             
                                             if assemblyai_transcript:
                                                 from app.models import MeetingTranscription
