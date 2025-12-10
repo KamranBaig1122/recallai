@@ -202,3 +202,6 @@ REQUEST_ONLY_CALENDAR_SCOPES = os.getenv('REQUEST_ONLY_CALENDAR_SCOPES', '').low
 # Redis for background tasks (optional - can use Django Q or Celery)
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 
+# Invite-ellie-backend API settings for user authentication
+INVITE_ELLIE_BACKEND_API_URL = os.getenv('INVITE_ELLIE_BACKEND_API_URL', 'https://api.stage.inviteellie.ai')
+

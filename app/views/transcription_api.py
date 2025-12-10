@@ -6,7 +6,7 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from app.models import Calendar, CalendarEvent, MeetingTranscription
-from app.views.calendar_api import add_cors_headers
+from app.views.calendar_api import add_cors_headers, get_backend_user_id_from_request
 
 
 @require_http_methods(["GET", "OPTIONS"])
@@ -18,33 +18,59 @@ def api_list_transcriptions(request):
         return add_cors_headers(response, request)
     
     try:
-        userId = request.GET.get('userId')
+        # Get backend_user_id from request (JWT token or query param)
+        backend_user_id = get_backend_user_id_from_request(request)
         print(f'[TranscriptionAPI] ==========================================')
         print(f'[TranscriptionAPI] 📋 LIST TRANSCRIPTIONS REQUEST')
-        print(f'[TranscriptionAPI] User ID: {userId}')
+        print(f'[TranscriptionAPI] Backend User ID: {backend_user_id}')
         print(f'[TranscriptionAPI] ==========================================')
         
-        if not userId:
-            print(f'[TranscriptionAPI] ❌ ERROR: userId parameter is required')
-            response = JsonResponse({'error': 'userId parameter is required'}, status=400)
+        if not backend_user_id:
+            print(f'[TranscriptionAPI] ❌ ERROR: Authentication required')
+            response = JsonResponse({'error': 'Authentication required. Provide JWT token or userId parameter'}, status=400)
             return add_cors_headers(response, request)
         
-        # Get all calendars for this user
-        print(f'[TranscriptionAPI] Step 1: Fetching calendars for user...')
-        calendars = Calendar.objects.filter(user_id=userId)
+        # Get all transcriptions for this user (by backend_user_id)
+        # This includes transcriptions from both connected and disconnected calendars
+        print(f'[TranscriptionAPI] Step 1: Fetching transcriptions for user...')
+        transcriptions = MeetingTranscription.objects.filter(
+            backend_user_id=backend_user_id
+        ).order_by('-created_at')
+        
+        # Also include transcriptions linked via calendar events (for backward compatibility)
+        # Get calendars for this user
+        calendars = Calendar.objects.filter(
+            backend_user_id=backend_user_id
+        ) | Calendar.objects.filter(
+            user_id=backend_user_id
+        )
         calendar_ids = [str(cal.id) for cal in calendars]
         print(f'[TranscriptionAPI] Found {len(calendars)} calendars: {calendar_ids}')
         
-        # Get all events from these calendars
-        print(f'[TranscriptionAPI] Step 2: Fetching events from calendars...')
+        # Get events from these calendars
         events = CalendarEvent.objects.filter(calendar_id__in=calendar_ids)
         event_ids = [str(event.id) for event in events]
         print(f'[TranscriptionAPI] Found {len(events)} events: {event_ids}')
         
-        # Get all transcriptions for these events (including processing ones)
-        print(f'[TranscriptionAPI] Step 3: Fetching transcriptions for events...')
-        transcriptions = MeetingTranscription.objects.filter(calendar_event_id__in=event_ids).order_by('-created_at')
-        transcription_count = transcriptions.count()
+        # Also get transcriptions by calendar_event_id (for backward compatibility)
+        transcriptions_by_event = MeetingTranscription.objects.filter(
+            calendar_event_id__in=event_ids
+        ).order_by('-created_at')
+        
+        # Combine both queries (remove duplicates)
+        all_transcription_ids = set()
+        all_transcriptions = []
+        for t in transcriptions:
+            if str(t.id) not in all_transcription_ids:
+                all_transcription_ids.add(str(t.id))
+                all_transcriptions.append(t)
+        for t in transcriptions_by_event:
+            if str(t.id) not in all_transcription_ids:
+                all_transcription_ids.add(str(t.id))
+                all_transcriptions.append(t)
+        
+        transcriptions = all_transcriptions
+        transcription_count = len(transcriptions)
         print(f'[TranscriptionAPI] Found {transcription_count} transcriptions')
         
         if transcription_count == 0:
@@ -123,23 +149,47 @@ def api_get_transcription(request, transcription_id):
         return add_cors_headers(response, request)
     
     try:
-        userId = request.GET.get('userId')
-        if not userId:
-            response = JsonResponse({'error': 'userId parameter is required'}, status=400)
+        # Get backend_user_id from request (JWT token or query param)
+        backend_user_id = get_backend_user_id_from_request(request)
+        if not backend_user_id:
+            response = JsonResponse({'error': 'Authentication required. Provide JWT token or userId parameter'}, status=400)
             return add_cors_headers(response, request)
         
         transcription = MeetingTranscription.objects.get(id=transcription_id)
         
-        # Verify the transcription belongs to a calendar event owned by this user
+        # Get event and calendar (handle missing gracefully)
+        event = None
+        calendar = None
+        try:
+            event = CalendarEvent.objects.get(id=transcription.calendar_event_id)
+            if event and event.calendar_id:
+                try:
+                    calendar = Calendar.objects.get(id=event.calendar_id)
+                except Calendar.DoesNotExist:
+                    calendar = None
+        except CalendarEvent.DoesNotExist:
+            event = None
+            calendar = None
+        
+        # Verify the transcription belongs to this user
         print(f'[TranscriptionAPI] Verifying ownership...')
-        event = CalendarEvent.objects.get(id=transcription.calendar_event_id)
-        calendar = Calendar.objects.get(id=event.calendar_id)
         
-        print(f'[TranscriptionAPI]   Event: {event.title or "Untitled"} (ID: {event.id})')
-        print(f'[TranscriptionAPI]   Calendar user ID: {calendar.user_id}')
-        print(f'[TranscriptionAPI]   Request user ID: {userId}')
+        # Check backend_user_id first (preferred)
+        if transcription.backend_user_id:
+            transcription_belongs_to_user = str(transcription.backend_user_id) == str(backend_user_id)
+        else:
+            # Fallback: check via calendar event (if it exists)
+            if calendar:
+                calendar_belongs_to_user = (
+                    (calendar.backend_user_id and str(calendar.backend_user_id) == str(backend_user_id)) or
+                    (calendar.user_id and str(calendar.user_id) == str(backend_user_id))
+                )
+                transcription_belongs_to_user = calendar_belongs_to_user
+            else:
+                # No calendar/event found, can't verify ownership - deny access
+                transcription_belongs_to_user = False
         
-        if str(calendar.user_id) != str(userId):
+        if not transcription_belongs_to_user:
             print(f'[TranscriptionAPI] ❌ ERROR: Transcription does not belong to this user')
             response = JsonResponse({'error': 'Transcription does not belong to this user'}, status=403)
             return add_cors_headers(response, request)
@@ -149,14 +199,17 @@ def api_get_transcription(request, transcription_id):
         result = {
             'id': str(transcription.id),
             'event_id': str(transcription.calendar_event_id),
-            'calendar_id': str(event.calendar_id),
+            'calendar_id': str(event.calendar_id) if event and event.calendar_id else None,
+            'calendar_email': calendar.email if calendar else None,
+            'calendar_platform': calendar.platform if calendar else (event.platform if event else None),
+            'calendar_status': calendar.status if calendar else 'unknown',
             'bot_id': transcription.bot_id,
-            'assemblyai_transcript_id': transcription.assemblyai_transcript_id,
-            'meeting_title': event.title or 'Untitled Meeting',
-            'meeting_url': event.meeting_url,
-            'start_time': event.start_time.isoformat() if event.start_time else None,
-            'end_time': event.end_time.isoformat() if event.end_time else None,
-            'platform': event.platform,
+            'assemblyai_transcript_id': transcription.assemblyai_transcript_id or '',
+            'meeting_title': event.title if event else 'Unknown Meeting',
+            'meeting_url': event.meeting_url if event else None,
+            'start_time': event.start_time.isoformat() if event and event.start_time else None,
+            'end_time': event.end_time.isoformat() if event and event.end_time else None,
+            'platform': event.platform if event else None,
             'transcript_data': transcription.transcript_data,
             'transcript_text': transcription.transcript_text,
             'summary': transcription.summary,

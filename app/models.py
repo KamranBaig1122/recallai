@@ -26,26 +26,38 @@ class Calendar(models.Model):
         ('microsoft_outlook', 'Microsoft Outlook'),
     ]
     
+    STATUS_CHOICES = [
+        ('connected', 'Connected'),
+        ('disconnected', 'Disconnected'),
+    ]
+    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user_id = models.UUIDField()
+    user_id = models.UUIDField()  # Keep for backward compatibility during migration
+    backend_user_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend user ID
     platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES)
     recall_id = models.CharField(max_length=255, unique=True)
     recall_data = JSONField(default=dict)
     auto_record_external_events = models.BooleanField(default=False)
     auto_record_only_confirmed_events = models.BooleanField(default=False)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='connected')  # connected or disconnected
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
         db_table = 'calendars'
+        indexes = [
+            models.Index(fields=['backend_user_id']),
+            models.Index(fields=['status']),
+        ]
     
     @property
     def email(self):
         return self.recall_data.get('platform_email')
     
     @property
-    def status(self):
+    def recall_status(self):
+        """Get status from recall_data (for backward compatibility)"""
         return self.recall_data.get('status')
     
     def get_connect_url(self):
@@ -64,7 +76,8 @@ class CalendarEvent(models.Model):
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    calendar_id = models.UUIDField()
+    calendar_id = models.UUIDField()  # Keep for relationship
+    backend_user_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend user ID
     platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES)
     recall_id = models.CharField(max_length=255, unique=True)
     recall_data = JSONField(default=dict)
@@ -76,6 +89,10 @@ class CalendarEvent(models.Model):
     
     class Meta:
         db_table = 'calendar_events'
+        indexes = [
+            models.Index(fields=['backend_user_id']),
+            models.Index(fields=['calendar_id']),
+        ]
     
     @property
     def start_time(self):
@@ -122,6 +139,7 @@ class BotRecording(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot_id = models.CharField(max_length=255, unique=True)  # Recall.ai bot ID
     calendar_event_id = models.UUIDField(null=True, blank=True)  # Link to calendar event
+    backend_user_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend user ID
     recall_data = JSONField(default=dict)  # Full bot data from Recall.ai
     status = models.CharField(max_length=50, default='pending')  # pending, processing, completed, failed
     
@@ -130,6 +148,10 @@ class BotRecording(models.Model):
     
     class Meta:
         db_table = 'bot_recordings'
+        indexes = [
+            models.Index(fields=['backend_user_id']),
+            models.Index(fields=['calendar_event_id']),
+        ]
     
     @property
     def recordings(self):
@@ -175,6 +197,7 @@ class MeetingTranscription(models.Model):
     """Stores meeting transcriptions and summaries from AssemblyAI"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     calendar_event_id = models.UUIDField()  # Link to calendar event
+    backend_user_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend user ID
     bot_id = models.CharField(max_length=255)  # Recall.ai bot ID
     assemblyai_transcript_id = models.CharField(max_length=255, null=True, blank=True)  # AssemblyAI transcript ID (not unique for real-time)
     
@@ -197,6 +220,7 @@ class MeetingTranscription(models.Model):
         # One transcription per bot per event (real-time transcripts get merged)
         unique_together = [['calendar_event_id', 'bot_id']]
         indexes = [
+            models.Index(fields=['backend_user_id']),
             models.Index(fields=['calendar_event_id']),
             models.Index(fields=['bot_id']),
             models.Index(fields=['assemblyai_transcript_id']),

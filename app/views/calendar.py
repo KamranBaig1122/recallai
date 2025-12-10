@@ -154,12 +154,15 @@ def calendar_delete(request, calendar_id):
         calendar_email = calendar.email or ''
         calendar_id_str = str(calendar_id)
         
-        # Delete related events and webhooks (to avoid foreign key constraints)
-        CalendarEvent.objects.filter(calendar_id=calendar_id).delete()
-        CalendarWebhook.objects.filter(calendar_id=calendar_id).delete()
+        # SOFT DELETE: Preserve meeting data (events, transcriptions, summaries, action items)
+        # Mark calendar as disconnected instead of deleting
+        calendar.status = 'disconnected'
+        calendar.save()
         
-        # Delete calendar
-        calendar.delete()
+        # DO NOT delete CalendarEvents - they contain meeting data
+        # DO NOT delete CalendarWebhooks - they are historical data
+        # DO NOT delete MeetingTranscriptions - they contain summaries and action items
+        # DO NOT delete BotRecordings - they contain meeting recordings
         
         response = redirect('/')
         response.set_cookie('notice', json.dumps(generate_notice(

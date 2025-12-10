@@ -57,16 +57,13 @@ def sync_calendar_events(calendar, last_updated_timestamp=None):
         for event in events:
             try:
                 if event.get('is_deleted'):
-                    # Event was deleted from calendar
-                    # Note: Recall doesn't delete events from their system, only marks as deleted
-                    # We delete from local database to keep it clean for UI display
-                    deleted_count = CalendarEvent.objects.filter(
-                        recall_id=event['id'],
-                        calendar_id=calendar.id
-                    ).delete()[0]
-                    if deleted_count > 0:
-                        events_deleted.append(event)
-                        print(f'INFO: Removed deleted event {event.get("id")} from local database for calendar {calendar.id}')
+                    # Event was deleted from calendar in Recall.ai
+                    # IMPORTANT: DO NOT delete CalendarEvent from local database
+                    # CalendarEvents contain meeting data (transcriptions, summaries, action items)
+                    # that must be preserved even when calendar is disconnected
+                    # We keep the event in the database so users can still access their meeting history
+                    print(f'INFO: Event {event.get("id")} marked as deleted in Recall.ai, but preserving in local database to maintain meeting data')
+                    # Don't add to events_deleted - we're preserving it
                 else:
                     # Create or update event
                     event_obj, created = CalendarEvent.objects.update_or_create(
@@ -77,6 +74,7 @@ def sync_calendar_events(calendar, last_updated_timestamp=None):
                             'recall_data': event,
                             'should_record_automatic': False,  # Will be updated later
                             'should_record_manual': None,
+                            'backend_user_id': calendar.backend_user_id,  # Set backend_user_id from calendar
                         }
                     )
                     events_upserted.append(event)

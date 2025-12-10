@@ -185,11 +185,23 @@ def bot_webhook(request, bot_id=None):
                             print(f'[bot-wh] [TRANSCRIPT]   Speaker: {participant_name}')
                             print(f'[bot-wh] [TRANSCRIPT]   Text: {transcript_text[:100]}...')
                             
+                            # Get backend_user_id from calendar_event
+                            backend_user_id = calendar_event.backend_user_id
+                            if not backend_user_id and calendar_event.calendar_id:
+                                # Fallback: get from calendar
+                                from app.models import Calendar
+                                try:
+                                    calendar = Calendar.objects.get(id=calendar_event.calendar_id)
+                                    backend_user_id = calendar.backend_user_id
+                                except Calendar.DoesNotExist:
+                                    pass
+                            
                             # Get or create transcription record (one per bot per event)
                             transcription, created = MeetingTranscription.objects.get_or_create(
                                 calendar_event_id=calendar_event.id,
                                 bot_id=bot_id,
                                 defaults={
+                                    'backend_user_id': backend_user_id,  # Set backend_user_id
                                     'assemblyai_transcript_id': None,  # Will be set when final transcript is fetched
                                     'transcript_data': {
                                         'utterances': [{
@@ -204,6 +216,11 @@ def bot_webhook(request, bot_id=None):
                                     'status': 'processing',
                                 }
                             )
+                            
+                            # Update backend_user_id if it wasn't set (for existing records)
+                            if not transcription.backend_user_id and backend_user_id:
+                                transcription.backend_user_id = backend_user_id
+                                transcription.save(update_fields=['backend_user_id'])
                             
                             if created:
                                 print(f'[bot-wh] [TRANSCRIPT] ✓ Created new transcription record in database (ID: {transcription.id})')
@@ -414,9 +431,21 @@ def bot_webhook(request, bot_id=None):
                                                         print(f'[bot-wh] [FALLBACK] ✓ Updated transcription with summary and action items')
                                                     else:
                                                         # Create new transcription record
+                                                        # Get backend_user_id from calendar_event
+                                                        backend_user_id = calendar_event.backend_user_id
+                                                        if not backend_user_id and calendar_event.calendar_id:
+                                                            # Fallback: get from calendar
+                                                            from app.models import Calendar
+                                                            try:
+                                                                calendar = Calendar.objects.get(id=calendar_event.calendar_id)
+                                                                backend_user_id = calendar.backend_user_id
+                                                            except Calendar.DoesNotExist:
+                                                                pass
+                                                        
                                                         MeetingTranscription.objects.create(
                                                             calendar_event_id=calendar_event.id,
                                                             bot_id=bot_id,
+                                                            backend_user_id=backend_user_id,  # Set backend_user_id
                                                             transcript_text=transcript_text,
                                                             transcript_data={
                                                                 **transcript_data,

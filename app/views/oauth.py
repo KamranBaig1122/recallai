@@ -51,6 +51,8 @@ def google_calendar_callback(request):
                 'webhook_url': f"{settings.PUBLIC_URL}/webhooks/recall-calendar-updates",
             })
             local_calendar.recall_data = recall_calendar
+            local_calendar.backend_user_id = userId  # Update backend_user_id
+            local_calendar.status = 'connected'  # Ensure status is connected
             local_calendar.save()
         else:
             # Create new calendar
@@ -66,7 +68,9 @@ def google_calendar_callback(request):
                 platform='google_calendar',
                 recall_id=recall_calendar['id'],
                 recall_data=recall_calendar,
-                user_id=userId,
+                user_id=userId,  # Keep for backward compatibility
+                backend_user_id=userId,  # Set backend_user_id (userId from state is backend user ID)
+                status='connected',  # Set status to connected
             )
         
         email = local_calendar.email or ''
@@ -132,6 +136,8 @@ def microsoft_outlook_callback(request):
                 'webhook_url': f"{settings.PUBLIC_URL}/webhooks/recall-calendar-updates",
             })
             local_calendar.recall_data = recall_calendar
+            local_calendar.backend_user_id = userId  # Update backend_user_id
+            local_calendar.status = 'connected'  # Ensure status is connected
             local_calendar.save()
         else:
             # Create new calendar
@@ -147,7 +153,9 @@ def microsoft_outlook_callback(request):
                 platform='microsoft_outlook',
                 recall_id=recall_calendar['id'],
                 recall_data=recall_calendar,
-                user_id=userId,
+                user_id=userId,  # Keep for backward compatibility
+                backend_user_id=userId,  # Set backend_user_id (userId from state is backend user ID)
+                status='connected',  # Set status to connected
             )
         
         email = local_calendar.email or ''
