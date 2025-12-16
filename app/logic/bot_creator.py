@@ -139,6 +139,172 @@ def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
         }
 
 
+def create_bot_immediately(meeting_url: str, meeting_password: str = None, backend_user_id: str = None) -> dict:
+    """
+    Create a meeting bot that joins immediately (without join_at)
+    
+    Args:
+        meeting_url: Full meeting URL (Zoom/Google Meet/Teams/GoTo Meeting)
+        meeting_password: Optional meeting password if required
+        backend_user_id: Optional backend user ID to associate with the bot
+        
+    Returns:
+        dict with 'success', 'bot_id', and 'error' keys
+    """
+    if not meeting_url:
+        return {
+            'success': False,
+            'error': 'meeting_url is required'
+        }
+    
+    try:
+        recall_service = get_service()
+        
+        # Detect platform from URL
+        platform = _detect_platform(meeting_url)
+        
+        # Note: GoTo Meeting doesn't support password-protected meetings
+        # If platform is gotomeeting and password is provided, warn but still try
+        if platform == "gotomeeting" and meeting_password:
+            print(f'WARNING: GoTo Meeting doesn\'t support password-protected meetings. Password will be ignored.')
+        
+        # Build recording config (same as scheduled bots)
+        recording_config = _build_recording_config()
+        
+        # Get region from environment
+        region = os.getenv('RECALL_REGION', 'us-west-2')
+        
+        # Create the bot without join_at (joins immediately)
+        # Bot name is "Ellie" as requested
+        bot_data = recall_service.create_bot(
+            meeting_url=meeting_url,
+            bot_name="Ellie",
+            join_at=None,  # No join_at means join immediately
+            platform=platform,
+            meeting_password=meeting_password,
+            recording_config=recording_config,
+            region=region
+        )
+        
+        bot_id = bot_data.get('id') or bot_data.get('bot_id') or bot_data.get('uuid')
+        if bot_id:
+            print(f'[BotCreator] Bot created successfully: {bot_id}')
+            print(f'[BotCreator] backend_user_id: {backend_user_id}')
+            
+            # Create a CalendarEvent for manually joined bots so transcriptions can be processed
+            # This allows the webhook to find the event and process transcriptions properly
+            calendar_event = None
+            if backend_user_id:
+                print(f'[BotCreator] Creating CalendarEvent for manual meeting...')
+                try:
+                    from app.models import CalendarEvent, Calendar
+                    from datetime import datetime
+                    import uuid
+                    
+                    # Find or create a "manual" calendar for this user (for manually joined meetings)
+                    # We'll use a special calendar_id that represents manual meetings
+                    # First, try to find an existing manual calendar for this user
+                    manual_calendar = Calendar.objects.filter(
+                        backend_user_id=backend_user_id,
+                        recall_data__is_manual=True
+                    ).first()
+                    
+                    if not manual_calendar:
+                        # Create a manual calendar for this user
+                        manual_calendar = Calendar.objects.create(
+                            user_id=backend_user_id,  # For backward compatibility
+                            backend_user_id=backend_user_id,
+                            platform='google_calendar',  # Default platform (not really used for manual meetings)
+                            recall_id=f'manual-{backend_user_id}',
+                            recall_data={
+                                'is_manual': True,
+                                'platform_email': None,
+                            },
+                            status='connected',
+                        )
+                        print(f'[BotCreator] Created manual calendar for user {backend_user_id}')
+                    
+                    # Create a CalendarEvent for this manual meeting
+                    # Extract meeting title from URL if possible
+                    meeting_title = f'Manual Meeting - {datetime.now().strftime("%Y-%m-%d %H:%M")}'
+                    if 'zoom.us' in meeting_url.lower():
+                        # Try to extract meeting ID from Zoom URL
+                        import re
+                        zoom_match = re.search(r'zoom\.us/j/(\d+)', meeting_url)
+                        if zoom_match:
+                            meeting_title = f'Zoom Meeting {zoom_match.group(1)}'
+                    
+                    calendar_event = CalendarEvent.objects.create(
+                        calendar_id=manual_calendar.id,
+                        backend_user_id=backend_user_id,
+                        platform=platform or 'google_calendar',
+                        recall_id=f'manual-event-{uuid.uuid4()}',
+                        recall_data={
+                            'meeting_url': meeting_url,
+                            'title': meeting_title,
+                            'start_time': datetime.now().isoformat(),
+                            'end_time': None,  # Will be set when meeting ends
+                            'bots': [{
+                                'bot_id': bot_id,
+                                'join_at': None,  # Joined immediately
+                                'created_at': datetime.now().isoformat(),
+                                'status': 'joining',
+                            }],
+                            'is_manual': True,  # Mark as manually created
+                        },
+                        should_record_manual=True,  # Mark as manual recording
+                    )
+                    print(f'[BotCreator] ✓ Created CalendarEvent {calendar_event.id} for manual meeting')
+                    print(f'[BotCreator]   Bot ID: {bot_id}')
+                    print(f'[BotCreator]   Calendar ID: {manual_calendar.id}')
+                    print(f'[BotCreator]   Backend User ID: {backend_user_id}')
+                except Exception as e:
+                    print(f'[BotCreator] ❌ ERROR: Could not create CalendarEvent for manual meeting: {e}')
+                    traceback.print_exc()
+                    calendar_event = None
+            
+            # Create BotRecording placeholder - MUST link to calendar_event if it exists
+            try:
+                from app.models import BotRecording
+                bot_recording, created = BotRecording.objects.update_or_create(
+                    bot_id=bot_id,
+                    defaults={
+                        'recall_data': bot_data,
+                        'status': 'joining',  # Bot is joining immediately
+                        'calendar_event_id': calendar_event.id if calendar_event else None,
+                        'backend_user_id': backend_user_id,
+                    }
+                )
+                if calendar_event:
+                    print(f'[BotCreator] ✓ Created/Updated BotRecording {bot_recording.id} linked to CalendarEvent {calendar_event.id}')
+                else:
+                    print(f'[BotCreator] ⚠ WARNING: Created BotRecording {bot_recording.id} but NO CalendarEvent (transcriptions may not be saved)')
+            except Exception as e:
+                print(f'[BotCreator] ❌ ERROR: Could not create BotRecording: {e}')
+                traceback.print_exc()
+            except Exception as e:
+                print(f'WARNING: Could not create BotRecording placeholder: {e}')
+            
+            return {
+                'success': True,
+                'bot_id': bot_id,
+                'bot_data': bot_data
+            }
+        else:
+            return {
+                'success': False,
+                'error': f'Failed to get bot_id from response: {bot_data}'
+            }
+            
+    except Exception as e:
+        error_msg = str(e)
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': error_msg
+        }
+
+
 def _detect_platform(meeting_url):
     """Detect platform from meeting URL"""
     url_lower = meeting_url.lower()
@@ -148,6 +314,8 @@ def _detect_platform(meeting_url):
         return "google_meet"
     elif "teams.microsoft.com" in url_lower or "teams.live.com" in url_lower:
         return "microsoft_teams"
+    elif "gotomeeting.com" in url_lower or "gotomeet.com" in url_lower or "g2m.com" in url_lower:
+        return "gotomeeting"
     return None
 
 

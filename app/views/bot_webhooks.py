@@ -153,13 +153,22 @@ def bot_webhook(request, bot_id=None):
                         # First, try to find via BotRecording table (most reliable)
                         from app.models import BotRecording
                         bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
-                        if bot_recording and bot_recording.calendar_event_id:
-                            calendar_event = CalendarEvent.objects.filter(id=bot_recording.calendar_event_id).first()
-                            if calendar_event:
-                                print(f'[bot-wh] [TRANSCRIPT] ✓ Found calendar event via BotRecording: {calendar_event.id}')
+                        if bot_recording:
+                            print(f'[bot-wh] [TRANSCRIPT] Found BotRecording: calendar_event_id={bot_recording.calendar_event_id}, backend_user_id={bot_recording.backend_user_id}')
+                            if bot_recording.calendar_event_id:
+                                calendar_event = CalendarEvent.objects.filter(id=bot_recording.calendar_event_id).first()
+                                if calendar_event:
+                                    print(f'[bot-wh] [TRANSCRIPT] ✓ Found calendar event via BotRecording: {calendar_event.id}')
+                                else:
+                                    print(f'[bot-wh] [TRANSCRIPT] ⚠ BotRecording has calendar_event_id={bot_recording.calendar_event_id} but CalendarEvent not found in database')
+                            else:
+                                print(f'[bot-wh] [TRANSCRIPT] ⚠ BotRecording exists but has no calendar_event_id')
+                        else:
+                            print(f'[bot-wh] [TRANSCRIPT] ⚠ BotRecording not found for bot_id: {bot_id}')
                         
                         # If not found, try searching in CalendarEvent's recall_data
                         if not calendar_event:
+                            print(f'[bot-wh] [TRANSCRIPT] Trying to find CalendarEvent via recall_data bots array...')
                             # Try searching where bots is an array of objects with 'bot_id' field
                             calendar_event = CalendarEvent.objects.filter(
                                 recall_data__bots__bot_id=bot_id
@@ -170,10 +179,81 @@ def bot_webhook(request, bot_id=None):
                                 calendar_event = CalendarEvent.objects.filter(
                                     recall_data__bots__id=bot_id
                                 ).first()
+                            
+                            if calendar_event:
+                                print(f'[bot-wh] [TRANSCRIPT] ✓ Found calendar event via recall_data query: {calendar_event.id}')
                         
                         if not calendar_event:
                             print(f'[bot-wh] [TRANSCRIPT] ⚠ WARNING: Calendar event not found for bot_id: {bot_id}')
-                            print(f'[bot-wh] [TRANSCRIPT] This transcript will not be saved to database')
+                            
+                            # Try to create CalendarEvent on-the-fly if we have backend_user_id from BotRecording
+                            if bot_recording and bot_recording.backend_user_id:
+                                print(f'[bot-wh] [TRANSCRIPT] Attempting to create CalendarEvent on-the-fly...')
+                                try:
+                                    from app.models import Calendar, CalendarEvent
+                                    from datetime import datetime
+                                    import uuid
+                                    
+                                    # Get bot data to extract meeting URL
+                                    recall_service = get_service()
+                                    bot_json = recall_service.get_bot(bot_id)
+                                    meeting_url = bot_json.get('meeting_url') if bot_json else None
+                                    
+                                    if meeting_url:
+                                        # Find or create manual calendar
+                                        manual_calendar = Calendar.objects.filter(
+                                            backend_user_id=bot_recording.backend_user_id,
+                                            recall_data__is_manual=True
+                                        ).first()
+                                        
+                                        if not manual_calendar:
+                                            manual_calendar = Calendar.objects.create(
+                                                user_id=bot_recording.backend_user_id,
+                                                backend_user_id=bot_recording.backend_user_id,
+                                                platform='google_calendar',
+                                                recall_id=f'manual-{bot_recording.backend_user_id}',
+                                                recall_data={'is_manual': True, 'platform_email': None},
+                                                status='connected',
+                                            )
+                                        
+                                        # Create CalendarEvent
+                                        calendar_event = CalendarEvent.objects.create(
+                                            calendar_id=manual_calendar.id,
+                                            backend_user_id=bot_recording.backend_user_id,
+                                            platform='google_calendar',
+                                            recall_id=f'manual-event-{uuid.uuid4()}',
+                                            recall_data={
+                                                'meeting_url': meeting_url,
+                                                'title': f'Manual Meeting - {datetime.now().strftime("%Y-%m-%d %H:%M")}',
+                                                'start_time': datetime.now().isoformat(),
+                                                'bots': [{'bot_id': bot_id, 'status': 'joining'}],
+                                                'is_manual': True,
+                                            },
+                                            should_record_manual=True,
+                                        )
+                                        
+                                        # Update BotRecording with calendar_event_id
+                                        bot_recording.calendar_event_id = calendar_event.id
+                                        bot_recording.save()
+                                        
+                                        print(f'[bot-wh] [TRANSCRIPT] ✓ Created CalendarEvent {calendar_event.id} on-the-fly and linked to BotRecording')
+                                    else:
+                                        print(f'[bot-wh] [TRANSCRIPT] ⚠ Could not get meeting_url from bot data')
+                                except Exception as e:
+                                    print(f'[bot-wh] [TRANSCRIPT] ❌ Error creating CalendarEvent on-the-fly: {e}')
+                                    import traceback
+                                    traceback.print_exc()
+                            
+                            if not calendar_event:
+                                print(f'[bot-wh] [TRANSCRIPT] This transcript will not be saved to database')
+                                print(f'[bot-wh] [TRANSCRIPT] Debug: Checking all CalendarEvents with is_manual=True...')
+                                # Debug: Check if any manual events exist
+                                from app.models import CalendarEvent
+                                manual_events = CalendarEvent.objects.filter(recall_data__is_manual=True)
+                                print(f'[bot-wh] [TRANSCRIPT] Found {manual_events.count()} manual CalendarEvents')
+                                for me in manual_events[:5]:  # Show first 5
+                                    bots_in_event = me.recall_data.get('bots', [])
+                                    print(f'[bot-wh] [TRANSCRIPT]   Event {me.id}: {len(bots_in_event)} bots, bot_ids: {[b.get("bot_id") for b in bots_in_event]}')
                         else:
                             print(f'[bot-wh] [TRANSCRIPT] ✓ Found calendar event: {calendar_event.id}')
                             

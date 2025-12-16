@@ -27,6 +27,7 @@ urlpatterns = [
     path('api/calendar/<uuid:calendar_id>/delete', calendar_api.api_delete_calendar, name='api-delete-calendar'),
     path('api/calendar-event/<uuid:event_id>/set-manual-record', calendar_api.api_set_manual_record, name='api-set-manual-record'),
     path('api/calendar-event/<uuid:event_id>/create-bot', calendar_api.api_create_bot_for_event, name='api-create-bot-for-event'),
+    path('api/join-meeting', calendar_api.api_join_meeting_immediately, name='api-join-meeting-immediately'),
     path('api/transcriptions', transcription_api.api_list_transcriptions, name='api-list-transcriptions'),
     path('api/transcriptions/<uuid:transcription_id>', transcription_api.api_get_transcription, name='api-get-transcription'),
     

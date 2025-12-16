@@ -551,3 +551,70 @@ def api_create_bot_for_event(request, event_id):
         traceback.print_exc()
         response = JsonResponse({'error': str(e)}, status=500)
         return add_cors_headers(response, request)
+
+
+@require_http_methods(["POST", "OPTIONS"])
+@csrf_exempt
+def api_join_meeting_immediately(request):
+    """
+    Create a bot and join a meeting immediately (without join_at)
+    Used when user enters a meeting link on the dashboard
+    """
+    if request.method == 'OPTIONS':
+        response = JsonResponse({})
+        return add_cors_headers(response, request)
+    
+    # Get backend_user_id from request (JWT token or query param)
+    backend_user_id = get_backend_user_id_from_request(request)
+    print(f'[api_join_meeting] backend_user_id from request: {backend_user_id}')
+    if not backend_user_id:
+        response = JsonResponse({'error': 'Authentication required. Provide JWT token or userId parameter'}, status=400)
+        return add_cors_headers(response, request)
+    
+    try:
+        # Parse request body
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            data = {}
+        
+        meeting_url = data.get('meeting_url') or data.get('meetingUrl') or data.get('link')
+        meeting_password = data.get('meeting_password') or data.get('meetingPassword') or data.get('password')
+        
+        if not meeting_url:
+            response = JsonResponse({'error': 'meeting_url is required'}, status=400)
+            return add_cors_headers(response, request)
+        
+        print(f'[api_join_meeting] Creating bot for meeting_url: {meeting_url[:50]}...')
+        
+        # Import the function to create bot immediately
+        from app.logic.bot_creator import create_bot_immediately
+        
+        # Create bot that joins immediately
+        # Pass backend_user_id so a CalendarEvent can be created for transcription processing
+        result = create_bot_immediately(
+            meeting_url=meeting_url, 
+            meeting_password=meeting_password,
+            backend_user_id=backend_user_id
+        )
+        
+        print(f'[api_join_meeting] Bot creation result: success={result.get("success")}, bot_id={result.get("bot_id")}')
+        
+        if result['success']:
+            response = JsonResponse({
+                'success': True,
+                'message': 'Bot is joining the meeting now',
+                'bot_id': result.get('bot_id'),
+            })
+        else:
+            response = JsonResponse({
+                'success': False,
+                'error': result.get('error', 'Failed to create bot'),
+            }, status=400)
+        
+        return add_cors_headers(response, request)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        response = JsonResponse({'error': str(e)}, status=500)
+        return add_cors_headers(response, request)
