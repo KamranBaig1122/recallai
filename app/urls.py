@@ -27,6 +27,7 @@ urlpatterns = [
     path('api/calendar/<uuid:calendar_id>/delete', calendar_api.api_delete_calendar, name='api-delete-calendar'),
     path('api/calendar-event/<uuid:event_id>/set-manual-record', calendar_api.api_set_manual_record, name='api-set-manual-record'),
     path('api/calendar-event/<uuid:event_id>/create-bot', calendar_api.api_create_bot_for_event, name='api-create-bot-for-event'),
+    path('api/calendar-event/<uuid:event_id>/bot/<str:bot_id>', calendar_api.api_delete_bot_for_event, name='api-delete-bot-for-event'),
     path('api/join-meeting', calendar_api.api_join_meeting_immediately, name='api-join-meeting-immediately'),
     path('api/transcriptions', transcription_api.api_list_transcriptions, name='api-list-transcriptions'),
     path('api/transcriptions/<uuid:transcription_id>', transcription_api.api_get_transcription, name='api-get-transcription'),
@@ -35,6 +36,7 @@ urlpatterns = [
     path('api/user/meetings', user_api.api_user_meetings, name='api-user-meetings'),
     path('api/user/transcriptions', user_api.api_user_transcriptions, name='api-user-transcriptions'),
     path('api/user/recordings', user_api.api_user_recordings, name='api-user-recordings'),
+    path('api/user/<uuid:user_id>/delete-all-data', calendar_api.api_delete_user_data, name='api-delete-user-data'),
     
     # Chat API endpoint
     path('api/chat', chat_api.api_chat, name='api-chat'),

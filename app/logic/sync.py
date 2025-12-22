@@ -63,6 +63,114 @@ def sync_calendar_events(calendar, last_updated_timestamp=None):
                     # that must be preserved even when calendar is disconnected
                     # We keep the event in the database so users can still access their meeting history
                     print(f'INFO: Event {event.get("id")} marked as deleted in Recall.ai, but preserving in local database to maintain meeting data')
+                    
+                    # Delete scheduled bots for this event
+                    try:
+                        event_obj = CalendarEvent.objects.filter(recall_id=event.get('id')).first()
+                        if event_obj:
+                            bots = event_obj.bots
+                            if bots and len(bots) > 0:
+                                from django.utils import timezone
+                                from app.models import BotRecording
+                                
+                                deleted_bots = []
+                                for bot in bots:
+                                    bot_id = bot.get('bot_id') or bot.get('id')
+                                    if not bot_id:
+                                        continue
+                                    
+                                    # Only delete scheduled bots that haven't joined yet
+                                    bot_status = bot.get('status', '').lower()
+                                    join_at = bot.get('join_at')
+                                    
+                                    # Check if bot is scheduled (has join_at in future) or hasn't joined yet
+                                    should_delete = False
+                                    if join_at:
+                                        try:
+                                            join_time = datetime.fromisoformat(join_at.replace('Z', '+00:00'))
+                                            if timezone.is_naive(join_time):
+                                                join_time = timezone.make_aware(join_time)
+                                            # Delete if join time is in the future (scheduled bot)
+                                            if join_time > timezone.now():
+                                                should_delete = True
+                                        except:
+                                            # If we can't parse join_at, check status
+                                            if bot_status in ['pending', 'scheduled', 'waiting']:
+                                                should_delete = True
+                                    elif bot_status in ['pending', 'scheduled', 'waiting']:
+                                        # No join_at but status indicates it's scheduled
+                                        should_delete = True
+                                    
+                                    if should_delete:
+                                        try:
+                                            # Delete bot from Recall.ai
+                                            recall_service.delete_bot(bot_id)
+                                            print(f'INFO: ✓ Deleted scheduled bot {bot_id} from Recall.ai for deleted event {event.get("id")}')
+                                            deleted_bots.append(bot_id)
+                                            
+                                            # Delete BotRecording if it exists (only for scheduled bots)
+                                            BotRecording.objects.filter(bot_id=bot_id).delete()
+                                            print(f'INFO: ✓ Deleted BotRecording for bot {bot_id}')
+                                        except Exception as delete_error:
+                                            # If bot deletion fails (e.g., bot already joined), log and continue
+                                            print(f'WARNING: Could not delete bot {bot_id} from Recall.ai: {delete_error}')
+                                            # Check if bot has already joined - if so, don't delete BotRecording
+                                            try:
+                                                bot_data = recall_service.get_bot(bot_id)
+                                                bot_status_from_api = bot_data.get('status', '').lower()
+                                                if bot_status_from_api in ['joined', 'recording', 'done', 'completed']:
+                                                    print(f'INFO: Bot {bot_id} has already joined, preserving BotRecording')
+                                                else:
+                                                    # Bot is still scheduled, try to delete BotRecording
+                                                    BotRecording.objects.filter(bot_id=bot_id).delete()
+                                            except:
+                                                # If we can't check bot status, preserve BotRecording to be safe
+                                                pass
+                                    
+                                # Remove deleted bots from recall_data
+                                if deleted_bots:
+                                    recall_data = event_obj.recall_data.copy()
+                                    bots_list = recall_data.get('bots', [])
+                                    # Filter out deleted bots
+                                    updated_bots = [
+                                        bot for bot in bots_list
+                                        if (bot.get('bot_id') or bot.get('id')) not in deleted_bots
+                                    ]
+                                    recall_data['bots'] = updated_bots
+                                    event_obj.recall_data = recall_data
+                                    event_obj.save()
+                                    print(f'INFO: ✓ Removed {len(deleted_bots)} bot(s) from CalendarEvent {event_obj.id} recall_data')
+                                    
+                                    # Broadcast WebSocket update immediately after bot deletion
+                                    try:
+                                        from channels.layers import get_channel_layer
+                                        from asgiref.sync import async_to_sync
+                                        channel_layer = get_channel_layer()
+                                        if channel_layer:
+                                            group_name = f'calendar_updates_{calendar.user_id}'
+                                            async_to_sync(channel_layer.group_send)(
+                                                group_name,
+                                                {
+                                                    'type': 'calendar_update',
+                                                    'message': {
+                                                        'calendar_id': str(calendar.id),
+                                                        'event': 'bots_deleted',
+                                                        'event_id': str(event_obj.id),
+                                                        'deleted_bot_ids': deleted_bots,
+                                                        'timestamp': datetime.now().isoformat(),
+                                                    }
+                                                }
+                                            )
+                                            print(f'INFO: Broadcasted bot deletion to WebSocket group {group_name}')
+                                    except Exception as ws_error:
+                                        print(f'WARNING: Failed to broadcast WebSocket update for bot deletion: {ws_error}')
+                                        import traceback
+                                        traceback.print_exc()
+                    except Exception as bot_delete_error:
+                        print(f'WARNING: Error deleting bots for deleted event {event.get("id")}: {bot_delete_error}')
+                        import traceback
+                        traceback.print_exc()
+                    
                     # Don't add to events_deleted - we're preserving it
                 else:
                     # Create or update event

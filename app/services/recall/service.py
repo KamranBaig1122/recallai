@@ -170,6 +170,64 @@ class RecallService:
             path=f'/api/v1/bot/{bot_id}/',
             method='GET'
         )
+    
+    def delete_bot(self, bot_id, region=None):
+        """
+        Delete a scheduled bot from Recall.ai
+        This can only be done on scheduled bots that have not yet joined a call.
+        
+        Args:
+            bot_id: Bot ID to delete
+            region: API region (us-east-1, us-west-2, eu-central-1, ap-northeast-1)
+            
+        Returns:
+            None (204 No Content on success)
+        """
+        import os
+        
+        if region:
+            api_host = f"https://{region}.recall.ai"
+        else:
+            # Try to get region from environment or use default
+            recall_region = os.getenv('RECALL_REGION', 'us-west-2')
+            api_host = f"https://{recall_region}.recall.ai"
+        
+        from .api_client import RecallApiClient
+        region_client = RecallApiClient(api_host=api_host)
+        
+        return region_client.request(
+            path=f'/api/v1/bot/{bot_id}/',
+            method='DELETE'
+        )
+    
+    def delete_bot_media(self, bot_id, region=None):
+        """
+        Delete bot media stored by Recall.ai
+        This is irreversible.
+        
+        Args:
+            bot_id: Bot ID to delete media for
+            region: API region (us-east-1, us-west-2, eu-central-1, ap-northeast-1)
+            
+        Returns:
+            Response data (200 OK on success)
+        """
+        import os
+        
+        if region:
+            api_host = f"https://{region}.recall.ai"
+        else:
+            # Try to get region from environment or use default
+            recall_region = os.getenv('RECALL_REGION', 'us-west-2')
+            api_host = f"https://{recall_region}.recall.ai"
+        
+        from .api_client import RecallApiClient
+        region_client = RecallApiClient(api_host=api_host)
+        
+        return region_client.request(
+            path=f'/api/v1/bot/{bot_id}/delete_media/',
+            method='POST'
+        )
 
 
 # Singleton instance
