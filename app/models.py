@@ -108,6 +108,10 @@ class CalendarEvent(models.Model):
     
     @property
     def title(self):
+        # For manual meetings, title is stored directly in recall_data['title']
+        if 'title' in self.recall_data:
+            return self.recall_data.get('title', '')
+        # For calendar-synced events, title is in recall_data['raw']
         raw = self.recall_data.get('raw', {})
         if self.platform == 'google_calendar':
             return raw.get('summary', '')

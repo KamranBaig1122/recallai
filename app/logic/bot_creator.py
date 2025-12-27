@@ -9,6 +9,70 @@ import os
 import traceback
 
 
+def get_user_name_from_backend(backend_user_id: str) -> str | None:
+    """
+    Fetch user name from Invite-ellie-backend API (OPTIONAL - returns None if unavailable)
+    
+    Args:
+        backend_user_id: User ID (UUID)
+        
+    Returns:
+        User's full name (first_name + last_name) or None if not available
+    """
+    try:
+        import requests
+        import os
+        
+        # Use the correct environment variable name
+        api_base_url = os.environ.get('INVITE_ELLIE_BACKEND_API_URL', 'http://localhost:8000')
+        
+        if not api_base_url:
+            print(f'[bot_creator] ⚠ INVITE_ELLIE_BACKEND_API_URL not set, skipping user name fetch')
+            return None
+        
+        # Use the same endpoint format as auth.py: /api/accounts/me/
+        api_url = f'{api_base_url}/api/accounts/me/'
+        headers = {'X-User-ID': backend_user_id}
+        
+        print(f'[bot_creator] Fetching user name from: {api_url}')
+        print(f'[bot_creator] Headers: X-User-ID={backend_user_id}')
+        
+        response = requests.get(
+            api_url,
+            headers=headers,
+            timeout=5  # Increased timeout slightly
+        )
+        
+        print(f'[bot_creator] API response status: {response.status_code}')
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f'[bot_creator] API response data: {data}')
+            
+            first_name = data.get('first_name', '').strip() if data.get('first_name') else ''
+            last_name = data.get('last_name', '').strip() if data.get('last_name') else ''
+            full_name = f'{first_name} {last_name}'.strip()
+            
+            if full_name:
+                print(f'[bot_creator] ✓ Successfully fetched user name: {full_name}')
+                return full_name
+            else:
+                print(f'[bot_creator] ⚠ User name fields are empty in API response')
+        else:
+            print(f'[bot_creator] ⚠ API returned status {response.status_code}: {response.text[:200]}')
+            
+    except requests.exceptions.Timeout:
+        print(f'[bot_creator] ⚠ Request timeout while fetching user name (optional, continuing)')
+    except requests.exceptions.RequestException as e:
+        print(f'[bot_creator] ⚠ Request error while fetching user name (optional): {e}')
+    except Exception as e:
+        print(f'[bot_creator] ⚠ Could not fetch user name (optional): {e}')
+        import traceback
+        traceback.print_exc()
+    
+    return None
+
+
 def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
     """
     Create a meeting bot for a calendar event with scheduled join time
@@ -86,6 +150,15 @@ def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
         
         bot_id = bot_data.get('id') or bot_data.get('bot_id') or bot_data.get('uuid')
         if bot_id:
+            # Fetch owner name (OPTIONAL - will be None if unavailable)
+            owner_name = None
+            if event.backend_user_id:
+                owner_name = get_user_name_from_backend(str(event.backend_user_id))
+                if owner_name:
+                    print(f'[BotCreator] Fetched owner name: {owner_name}')
+                else:
+                    print(f'[BotCreator] ⚠ Owner name not available (optional, will continue without it)')
+            
             # Update event's recall_data to include bot info
             recall_data = event.recall_data.copy()
             if 'bots' not in recall_data:
@@ -107,14 +180,32 @@ def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
             # For now, we'll create a placeholder BotRecording that will be updated when retrieved
             try:
                 from app.models import BotRecording
-                BotRecording.objects.update_or_create(
+                # Initialize recall_data with owner_name if available
+                recall_data_dict = bot_data.copy() if isinstance(bot_data, dict) else {}
+                if owner_name:
+                    if not recall_data_dict:
+                        recall_data_dict = {}
+                    recall_data_dict['owner_name'] = owner_name
+                
+                bot_recording, created = BotRecording.objects.update_or_create(
                     bot_id=bot_id,
                     defaults={
-                        'recall_data': bot_data,
+                        'recall_data': recall_data_dict,
                         'status': 'pending',
-                        'calendar_event_id': event.id
+                        'calendar_event_id': event.id,
+                        'backend_user_id': event.backend_user_id,
                     }
                 )
+                
+                # If bot_recording already exists, update owner_name if available
+                if not created and owner_name:
+                    if not bot_recording.recall_data:
+                        bot_recording.recall_data = {}
+                    bot_recording.recall_data['owner_name'] = owner_name
+                    bot_recording.save(update_fields=['recall_data'])
+                    print(f'[BotCreator] ✓ Stored owner name in existing BotRecording: {owner_name}')
+                elif created and owner_name:
+                    print(f'[BotCreator] ✓ Stored owner name in BotRecording: {owner_name}')
             except Exception as e:
                 print(f'WARNING: Could not create BotRecording placeholder: {e}')
             
@@ -139,7 +230,7 @@ def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
         }
 
 
-def create_bot_immediately(meeting_url: str, meeting_password: str = None, backend_user_id: str = None) -> dict:
+def create_bot_immediately(meeting_url: str, meeting_password: str = None, backend_user_id: str = None, meeting_name: str = None) -> dict:
     """
     Create a meeting bot that joins immediately (without join_at)
     
@@ -147,6 +238,7 @@ def create_bot_immediately(meeting_url: str, meeting_password: str = None, backe
         meeting_url: Full meeting URL (Zoom/Google Meet/Teams/GoTo Meeting)
         meeting_password: Optional meeting password if required
         backend_user_id: Optional backend user ID to associate with the bot
+        meeting_name: Optional meeting name/title to use for the CalendarEvent
         
     Returns:
         dict with 'success', 'bot_id', and 'error' keys
@@ -225,14 +317,21 @@ def create_bot_immediately(meeting_url: str, meeting_password: str = None, backe
                         print(f'[BotCreator] Created manual calendar for user {backend_user_id}')
                     
                     # Create a CalendarEvent for this manual meeting
-                    # Extract meeting title from URL if possible
-                    meeting_title = f'Manual Meeting - {datetime.now().strftime("%Y-%m-%d %H:%M")}'
-                    if 'zoom.us' in meeting_url.lower():
-                        # Try to extract meeting ID from Zoom URL
-                        import re
-                        zoom_match = re.search(r'zoom\.us/j/(\d+)', meeting_url)
-                        if zoom_match:
-                            meeting_title = f'Zoom Meeting {zoom_match.group(1)}'
+                    # Use provided meeting_name if available, otherwise extract from URL or use default
+                    if meeting_name and meeting_name.strip():
+                        # Use the provided meeting name
+                        meeting_title = meeting_name.strip()
+                        print(f'[BotCreator] Using provided meeting name: {meeting_title}')
+                    else:
+                        # Fallback: Extract meeting title from URL if possible
+                        meeting_title = f'Manual Meeting - {datetime.now().strftime("%Y-%m-%d %H:%M")}'
+                        if 'zoom.us' in meeting_url.lower():
+                            # Try to extract meeting ID from Zoom URL
+                            import re
+                            zoom_match = re.search(r'zoom\.us/j/(\d+)', meeting_url)
+                            if zoom_match:
+                                meeting_title = f'Zoom Meeting {zoom_match.group(1)}'
+                        print(f'[BotCreator] Using auto-generated meeting title: {meeting_title}')
                     
                     calendar_event = CalendarEvent.objects.create(
                         calendar_id=manual_calendar.id,
@@ -263,18 +362,43 @@ def create_bot_immediately(meeting_url: str, meeting_password: str = None, backe
                     traceback.print_exc()
                     calendar_event = None
             
+            # Fetch owner name (OPTIONAL - will be None if unavailable)
+            owner_name = get_user_name_from_backend(backend_user_id) if backend_user_id else None
+            if owner_name:
+                print(f'[BotCreator] Fetched owner name: {owner_name}')
+            else:
+                print(f'[BotCreator] ⚠ Owner name not available (optional, will continue without it)')
+            
             # Create BotRecording placeholder - MUST link to calendar_event if it exists
             try:
                 from app.models import BotRecording
+                # Initialize recall_data with owner_name if available
+                recall_data_dict = bot_data.copy() if isinstance(bot_data, dict) else {}
+                if owner_name:
+                    if not recall_data_dict:
+                        recall_data_dict = {}
+                    recall_data_dict['owner_name'] = owner_name
+                
                 bot_recording, created = BotRecording.objects.update_or_create(
                     bot_id=bot_id,
                     defaults={
-                        'recall_data': bot_data,
+                        'recall_data': recall_data_dict,
                         'status': 'joining',  # Bot is joining immediately
                         'calendar_event_id': calendar_event.id if calendar_event else None,
                         'backend_user_id': backend_user_id,
                     }
                 )
+                
+                # If bot_recording already exists, update owner_name if available
+                if not created and owner_name:
+                    if not bot_recording.recall_data:
+                        bot_recording.recall_data = {}
+                    bot_recording.recall_data['owner_name'] = owner_name
+                    bot_recording.save(update_fields=['recall_data'])
+                    print(f'[BotCreator] ✓ Stored owner name in existing BotRecording: {owner_name}')
+                elif created and owner_name:
+                    print(f'[BotCreator] ✓ Stored owner name in BotRecording: {owner_name}')
+                
                 if calendar_event:
                     print(f'[BotCreator] ✓ Created/Updated BotRecording {bot_recording.id} linked to CalendarEvent {calendar_event.id}')
                 else:
@@ -282,8 +406,6 @@ def create_bot_immediately(meeting_url: str, meeting_password: str = None, backe
             except Exception as e:
                 print(f'[BotCreator] ❌ ERROR: Could not create BotRecording: {e}')
                 traceback.print_exc()
-            except Exception as e:
-                print(f'WARNING: Could not create BotRecording placeholder: {e}')
             
             return {
                 'success': True,

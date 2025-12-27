@@ -1,7 +1,7 @@
 from django.urls import path
 from app.views import root, auth, oauth, calendar, calendar_event, webhooks, calendar_api, transcription_api, user_api, chat_api
 import app.views.bot_webhooks as bot_webhooks
-from app.views import static_files, bot_recordings, recordings_list
+from app.views import static_files, bot_recordings, recordings_list, contextual_nudges_api
 
 urlpatterns = [
     # Root
@@ -40,6 +40,9 @@ urlpatterns = [
     
     # Chat API endpoint
     path('api/chat', chat_api.api_chat, name='api-chat'),
+    
+    # Contextual Nudges API endpoint
+    path('api/contextual-nudges', contextual_nudges_api.api_get_contextual_nudges, name='api-get-contextual-nudges'),
     
     # Calendar Event
     path('calendar-event/<uuid:event_id>/set-manual-record', calendar_event.set_manual_record, name='calendar-event-set-manual-record'),

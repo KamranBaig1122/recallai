@@ -34,44 +34,77 @@ def generate_summary_and_action_items_with_groq(transcript_text: str) -> Optiona
         "Authorization": f"Bearer {api_key}"
     }
     
-    # Create prompt that asks for summary (without names) and action items
-    prompt = f"""Analyze the following meeting transcript and provide:
+    # Enhanced prompt for accurate summary and action items with participant names
+    prompt = f"""You are an expert meeting analyst. Analyze the COMPLETE meeting transcript below and generate a comprehensive summary and action items.
 
-1. A comprehensive summary of the meeting (DO NOT include any participant names or personal identifiers - use generic terms like "the speaker" or "participants")
-2. A list of action items mentioned in the meeting
+INSTRUCTIONS:
+1. Read the ENTIRE transcript carefully from start to finish
+2. Identify all participants by their names as they appear in the transcript
+3. Create a detailed, chronological summary that captures:
+   - Key topics discussed
+   - Important decisions made
+   - Main points raised by each participant (use their actual names)
+   - Outcomes and conclusions
+   - Any deadlines or timelines mentioned
+4. Extract ALL action items with:
+   - The specific task or deliverable
+   - Who is responsible (use participant names)
+   - Any deadlines or timelines mentioned
+   - Context about why the action item is needed
 
-Format your response as JSON with the following structure:
+REQUIREMENTS:
+- Be thorough and accurate - don't miss important details
+- Include participant names in the summary when relevant
+- For action items, always include the responsible person's name if mentioned
+- Maintain chronological flow in the summary
+- Capture nuances and context, not just surface-level information
+- If an action item has a deadline, include it in the text
+
+Format your response as VALID JSON only (no markdown, no code blocks, no explanations):
 {{
-  "summary": "detailed summary here without any names",
+  "summary": "A comprehensive, detailed summary of the meeting that includes participant names, key discussions, decisions, and outcomes. Write in clear paragraphs covering the entire meeting chronologically.",
   "action_items": [
-    {{"text": "action item 1"}},
-    {{"text": "action item 2"}}
+    {{"text": "Complete action item description with responsible person name and deadline if mentioned"}},
+    {{"text": "Another action item with full context"}}
   ]
 }}
 
-Meeting Transcript:
-{transcript_text[:8000]}"""  # Limit to 8000 chars to stay within token limits
+Meeting Transcript (COMPLETE - analyze all of it):
+{transcript_text}"""
     
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
             {
+                "role": "system",
+                "content": "You are a professional meeting analyst. Your task is to analyze meeting transcripts and extract comprehensive summaries and action items. Always be thorough, accurate, and include participant names when relevant."
+            },
+            {
                 "role": "user",
                 "content": prompt
             }
         ],
-        "temperature": 0.3,  # Lower temperature for more consistent results
-        "max_tokens": 2000
+        "temperature": 0.2,  # Lower temperature for more accurate and consistent results
+        "max_tokens": 4000  # Increased for longer, more detailed summaries
     }
     
     try:
+        # Calculate transcript size in tokens (rough estimate: 1 token ≈ 4 characters)
+        estimated_tokens = len(transcript_text) // 4
+        estimated_total_tokens = estimated_tokens + 1000  # Add prompt tokens
+        
         print(f'[Groq] ==========================================')
         print(f'[Groq] 🤖 GENERATING SUMMARY & ACTION ITEMS')
-        print(f'[Groq] Model: llama-3.3-70b-versatile')
-        print(f'[Groq] Transcript length: {len(transcript_text)} chars')
+        print(f'[Groq] Model: llama-3.3-70b-versatile (128K context window)')
+        print(f'[Groq] Full transcript length: {len(transcript_text):,} chars')
+        print(f'[Groq] Estimated tokens: ~{estimated_tokens:,} (input)')
+        print(f'[Groq] Total estimated: ~{estimated_total_tokens:,} tokens')
+        print(f'[Groq] ✅ Sending COMPLETE transcript (no truncation)')
         print(f'[Groq] ==========================================')
         
-        response = requests.post(endpoint, json=payload, headers=headers, timeout=30)
+        # Increased timeout for longer transcripts
+        timeout_seconds = max(60, len(transcript_text) // 1000)  # At least 60s, more for longer transcripts
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=timeout_seconds)
         response.raise_for_status()
         
         result = response.json()
@@ -109,16 +142,20 @@ Meeting Transcript:
             summary = parsed.get('summary', '').strip()
             action_items = parsed.get('action_items', [])
             
-            # Ensure action_items is a list of dicts
+            # Ensure action_items is a list of dicts with proper formatting
             if action_items and isinstance(action_items, list):
-                # Convert to proper format if needed
                 formatted_action_items = []
                 for item in action_items:
                     if isinstance(item, dict):
-                        formatted_action_items.append({
-                            "text": item.get('text', str(item)).strip()
-                        })
-                    elif isinstance(item, str):
+                        # Extract text - include speaker name in text if available
+                        text = item.get('text', item.get('action', item.get('item', str(item)))).strip()
+                        # If speaker/responsible person is separate, append to text
+                        speaker = item.get('speaker') or item.get('responsible') or item.get('assignee') or item.get('owner')
+                        if speaker and speaker.strip() and speaker.strip() not in text:
+                            text = f"{text} (Responsible: {speaker.strip()})"
+                        if text:  # Only add non-empty action items
+                            formatted_action_items.append({"text": text})
+                    elif isinstance(item, str) and item.strip():
                         formatted_action_items.append({"text": item.strip()})
                 
                 action_items = formatted_action_items

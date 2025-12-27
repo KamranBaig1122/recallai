@@ -228,6 +228,35 @@ class RecallService:
             path=f'/api/v1/bot/{bot_id}/delete_media/',
             method='POST'
         )
+    
+    def leave_bot_call(self, bot_id, region=None):
+        """
+        Make a bot leave an active call/meeting.
+        This can only be done on bots that are currently in a call.
+        
+        Args:
+            bot_id: Bot ID to make leave the call
+            region: API region (us-east-1, us-west-2, eu-central-1, ap-northeast-1)
+            
+        Returns:
+            Response data (200 OK on success)
+        """
+        import os
+        
+        if region:
+            api_host = f"https://{region}.recall.ai"
+        else:
+            # Try to get region from environment or use default
+            recall_region = os.getenv('RECALL_REGION', 'us-west-2')
+            api_host = f"https://{recall_region}.recall.ai"
+        
+        from .api_client import RecallApiClient
+        region_client = RecallApiClient(api_host=api_host)
+        
+        return region_client.request(
+            path=f'/api/v1/bot/{bot_id}/leave_call/',
+            method='POST'
+        )
 
 
 # Singleton instance

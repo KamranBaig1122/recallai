@@ -47,6 +47,17 @@ def generate_contextual_nudges_and_impact_score_with_groq(
         print('[Groq Nudges] ⚠ WARNING: Transcript text is too short or empty')
         return None
     
+    # Use full transcript (no truncation for 128k context window support)
+    full_transcript = transcript_text.strip()
+    transcript_length = len(full_transcript)
+    
+    # Log transcript length for monitoring
+    print(f'[Groq Nudges] Transcript length: {transcript_length:,} characters (full transcript will be processed)')
+    
+    # Warn if transcript is extremely long (though we'll still process it with 128k context)
+    if transcript_length > 100000:
+        print(f'[Groq Nudges] ℹ INFO: Very long transcript ({transcript_length:,} chars). Using full transcript with 128k context window.')
+    
     endpoint = "https://api.groq.com/openai/v1/chat/completions"
     
     headers = {
@@ -57,34 +68,66 @@ def generate_contextual_nudges_and_impact_score_with_groq(
     # Build context from previous meetings
     previous_context = ""
     if previous_meetings and len(previous_meetings) > 0:
-        previous_context = "\n\nPrevious Meeting Context:\n"
-        for meeting in previous_meetings[:5]:  # Limit to last 5 meetings
+        previous_context = "\n\n=== PREVIOUS MEETING CONTEXT ===\n"
+        for i, meeting in enumerate(previous_meetings[:5], 1):  # Limit to last 5 meetings
             if meeting.get('summary'):
-                previous_context += f"- {meeting.get('summary', '')[:200]}...\n"
+                prev_summary = meeting.get('summary', '')
+                prev_date = meeting.get('date', meeting.get('created_at', 'Unknown date'))
+                previous_context += f"\nMeeting {i} ({prev_date}):\n{prev_summary}\n"
     
-    # Create comprehensive prompt for contextual nudges and impact score
-    prompt = f"""Analyze the following meeting transcript and provide:
+    # Create comprehensive prompt aligned with real-world use cases
+    prompt = f"""You are an intelligent meeting assistant that observes live meetings and proactively surfaces short, actionable prompts to prevent common meeting failures: missed decisions, vague commitments, forgotten context, and poor follow-through.
 
-1. CONTEXTUAL NUDGES: Identify actionable prompts based on:
-   - Missing decisions (e.g., "Release timeline mentioned, but no owner assigned")
-   - Vague commitments (e.g., "Vague change mentioned. Ask for specifics?")
-   - Potential conflicts with previous meetings (e.g., "Potential mismatch with last agreed scope")
-   - Unanswered questions (e.g., "Pricing question raised but not answered")
-   - Missing stakeholders (e.g., "Marketing stakeholder not present")
-   - Missing follow-ups (e.g., "Dependency identified but no follow-up discussed")
-   - Meeting ending without recap (e.g., "Meeting ending without confirmed next steps")
+Analyze the ENTIRE meeting transcript below and identify contextual nudges based on these real-world scenarios:
 
-2. IMPACT SCORE: Rate the meeting's impact from 0-100 based on:
-   - Decision-making effectiveness (0-25 points)
-   - Action item clarity and ownership (0-25 points)
-   - Stakeholder engagement and coverage (0-25 points)
-   - Meeting productivity and follow-through potential (0-25 points)
+1. MISSING OWNERSHIP / UNASSIGNED DECISIONS
+   Example: Someone says "Let's ship this in two weeks" but no owner is assigned.
+   Nudge: "Release timeline mentioned, but no owner assigned. Assign responsibility?"
 
-Each nudge should be:
+2. CONFLICTS WITH PREVIOUS MEETINGS
+   Example: Client says "This isn't what we discussed last time."
+   Nudge: "Potential mismatch with last agreed scope (Nov 3). Review previous decision?"
+
+3. UNANSWERED QUESTIONS
+   Example: Prospect asks about pricing, but conversation moves on without answer.
+   Nudge: "Pricing question raised but not answered. Circle back?"
+
+4. MISSING FOLLOW-UPS / DEPENDENCIES
+   Example: Engineer says "We'll need approval from security first" but no follow-up discussed.
+   Nudge: "Dependency identified: Security approval. Track as blocker?"
+
+5. VAGUE COMMITMENTS
+   Example: Someone says "We'll tweak this later" without specifics.
+   Nudge: "Vague change mentioned. Ask for specifics or acceptance criteria?"
+
+6. MISSING STAKEHOLDERS
+   Example: Decision made about marketing launch dates, but marketing lead not present.
+   Nudge: "Marketing stakeholder not present. Loop them in before finalizing?"
+
+7. MEETING ENDING WITHOUT RECAP
+   Example: Call ending with multiple discussion threads but no confirmed next steps.
+   Nudge: "Meeting ending without confirmed next steps. Generate summary + action items?"
+
+CRITICAL REQUIREMENTS FOR EACH NUDGE:
 - Short and actionable (max 100 characters)
-- Linked to a specific moment in the transcript (include timestamp or speaker context)
-- Explainable (why this nudge is relevant)
-- Non-blocking (suggestive, not demanding)
+- Linked to exact transcript moment (include timestamp or speaker name if available)
+- Explainable (provide clear explanation of why this nudge is relevant)
+- Non-blocking (suggestive question format, not demanding)
+- Time-sensitive (only surface if action is still relevant)
+
+ANALYSIS INSTRUCTIONS:
+1. Read the ENTIRE transcript carefully from start to finish
+2. Compare current discussion with previous meeting context (if provided)
+3. Identify moments where decisions lack owners, questions go unanswered, commitments are vague, or follow-ups are missing
+4. Check if key stakeholders are missing when important decisions are being made
+5. Detect conflicts or inconsistencies with previous meeting outcomes
+6. Note if meeting is ending without clear next steps or recap
+
+IMPACT SCORE: Rate the meeting's impact from 0-100 based on:
+- Decision-making effectiveness (0-25 points): Were clear decisions made with owners?
+- Action item clarity and ownership (0-25 points): Are action items specific and assigned?
+- Stakeholder engagement and coverage (0-25 points): Were right people present for decisions?
+- Meeting productivity and follow-through potential (0-25 points): Will outcomes be actionable?
 
 Format your response as JSON:
 {{
@@ -93,15 +136,15 @@ Format your response as JSON:
       "text": "Release timeline mentioned, but no owner assigned. Assign responsibility?",
       "type": "missing_owner",
       "timestamp": "15:32",
-      "speaker": "Participant 1",
-      "explanation": "A timeline was discussed but no one was assigned to own the release"
+      "speaker": "John Doe",
+      "explanation": "At 15:32, John mentioned shipping in two weeks, but no one was assigned ownership of this timeline"
     }},
     {{
-      "text": "Vague change mentioned. Ask for specifics or acceptance criteria?",
-      "type": "vague_commitment",
+      "text": "Pricing question raised but not answered. Circle back?",
+      "type": "unanswered_question",
       "timestamp": "22:15",
-      "speaker": "Participant 2",
-      "explanation": "A change was mentioned without specific details or criteria"
+      "speaker": "Client",
+      "explanation": "Client asked about pricing at 22:15, but the conversation moved on without addressing it"
     }}
   ],
   "impact_score": 75.5,
@@ -113,37 +156,46 @@ Format your response as JSON:
   }}
 }}
 
-Meeting Summary:
-{summary[:1000] if summary else "No summary available"}
+=== MEETING SUMMARY ===
+{summary if summary else "No summary available"}
 
-Action Items:
-{json.dumps(action_items[:10], indent=2) if action_items else "No action items"}
+=== ACTION ITEMS ===
+{json.dumps(action_items[:20], indent=2) if action_items else "No action items"}
 
-Meeting Transcript (first 6000 chars):
-{transcript_text[:6000]}{previous_context}
+{previous_context}
 
-Analyze this meeting and provide contextual nudges and impact score."""
+=== FULL MEETING TRANSCRIPT ===
+{full_transcript}
+
+Analyze this complete meeting transcript and provide contextual nudges and impact score. Ensure accuracy by reading the entire transcript carefully."""
     
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "llama-3.3-70b-versatile",  # Supports large context windows
         "messages": [
+            {
+                "role": "system",
+                "content": "You are an expert meeting analyst specializing in identifying actionable insights, missed opportunities, and follow-up items from meeting transcripts. Be precise, contextual, and practical."
+            },
             {
                 "role": "user",
                 "content": prompt
             }
         ],
-        "temperature": 0.4,  # Slightly higher for more creative nudges
-        "max_tokens": 3000
+        "temperature": 0.3,  # Lower temperature for higher accuracy and consistency
+        "max_tokens": 4000  # Increased for detailed analysis of longer transcripts
     }
     
     try:
         print(f'[Groq Nudges] ==========================================')
         print(f'[Groq Nudges] 🤖 GENERATING CONTEXTUAL NUDGES & IMPACT SCORE')
         print(f'[Groq Nudges] Model: llama-3.3-70b-versatile')
-        print(f'[Groq Nudges] Transcript length: {len(transcript_text)} chars')
+        print(f'[Groq Nudges] Transcript length: {transcript_length:,} chars (full transcript)')
+        print(f'[Groq Nudges] Context window: 128k tokens (full transcript processing)')
+        print(f'[Groq Nudges] Previous meetings context: {len(previous_meetings) if previous_meetings else 0} meetings')
         print(f'[Groq Nudges] ==========================================')
         
-        response = requests.post(endpoint, json=payload, headers=headers, timeout=45)
+        # Increased timeout for processing full transcripts with 128k context window
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=120)
         response.raise_for_status()
         
         result = response.json()

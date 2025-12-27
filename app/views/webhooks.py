@@ -40,6 +40,7 @@ def recall_calendar_updates(request):
     try:
         # Parse request body
         body_str = request.body.decode('utf-8')
+        print(f'INFO: Raw request body (first 1000 chars): {body_str[:1000]}')
         body = json.loads(body_str)
         
         event = body.get('event')
@@ -47,14 +48,191 @@ def recall_calendar_updates(request):
         recall_id = payload.get('calendar_id')
         
         print(f'INFO: Received "{event}" calendar webhook from Recall')
-        print(f'INFO: Webhook payload: {json.dumps(payload, indent=2)}')
+        print(f'INFO: Full body JSON: {json.dumps(body, indent=2)}')
+        print(f'INFO: Full body keys: {list(body.keys())}')
+        print(f'INFO: Webhook payload (data only): {json.dumps(payload, indent=2)}')
         
-        if not event:
-            print(f'WARNING: Webhook missing "event" field. Ignoring.')
+        # Check if this is a bot status webhook FIRST (before checking calendar_id)
+        # Bot webhooks have bot info nested in body['data']['bot'] (not at top level)
+        # Structure: body['data']['bot']['id'] and body['data']['data']['code']
+        bot_id = None
+        bot_status_code = None
+        
+        # Check if body has 'data' key and then 'bot' inside it
+        # The actual structure is: body['data']['bot']['id']
+        if 'data' in body:
+            data_obj = body.get('data', {})
+            if isinstance(data_obj, dict):
+                # Check for bot info nested in data
+                if 'bot' in data_obj:
+                    bot_data = data_obj.get('bot', {})
+                    if isinstance(bot_data, dict):
+                        bot_id = bot_data.get('id')
+                        print(f'INFO: Found bot_id in body["data"]["bot"]["id"]: {bot_id}')
+                    else:
+                        print(f'INFO: body["data"]["bot"] is not a dict, type: {type(bot_data)}')
+                
+                # Get bot_status_code from data.data.code (nested structure)
+                # The actual structure is: body['data']['data']['code']
+                if 'data' in data_obj:
+                    nested_data = data_obj.get('data', {})
+                    if isinstance(nested_data, dict):
+                        bot_status_code = nested_data.get('code')
+                        print(f'INFO: Found bot_status_code in body["data"]["data"]["code"]: {bot_status_code}')
+            else:
+                print(f'INFO: body["data"] is not a dict, type: {type(data_obj)}')
+        
+        # Fallback: Check top-level 'bot' key (for backwards compatibility with other webhook formats)
+        if not bot_id and 'bot' in body:
+            bot_data = body.get('bot', {})
+            if isinstance(bot_data, dict):
+                bot_id = bot_data.get('id')
+                print(f'INFO: Found bot_id in body["bot"]["id"] (fallback): {bot_id}')
+        
+        # Fallback: If event indicates bot webhook but bot_id is None, try recursive extraction
+        is_bot_webhook = event and event.startswith('bot.')
+        if is_bot_webhook and not bot_id:
+            # Try alternative extraction methods - search recursively for UUID-like bot IDs
+            print(f'INFO: Bot webhook detected but bot_id is None. Trying recursive extraction...')
+            def find_bot_id_recursive(obj, path=""):
+                """Recursively search for bot id in nested structure"""
+                if isinstance(obj, dict):
+                    # Check if this dict has 'id' and looks like a bot id (UUID format)
+                    if 'id' in obj and isinstance(obj['id'], str):
+                        potential_id = obj['id']
+                        # Check if it looks like a UUID (contains hyphens and is 36 chars)
+                        if '-' in potential_id and len(potential_id) == 36:
+                            # Also check if parent key is 'bot' or we're in a bot-related structure
+                            print(f'INFO: Found potential bot_id at path {path}["id"]: {potential_id}')
+                            return potential_id
+                    # Recursively search nested dicts
+                    for key, value in obj.items():
+                        if key != 'event' and key != 'calendar_id' and key != 'recall_id':  # Skip known non-bot keys
+                            result = find_bot_id_recursive(value, f'{path}["{key}"]' if path else f'["{key}"]')
+                            if result:
+                                return result
+                elif isinstance(obj, list):
+                    for i, item in enumerate(obj):
+                        result = find_bot_id_recursive(item, f'{path}[{i}]')
+                        if result:
+                            return result
+                return None
+            
+            found_bot_id = find_bot_id_recursive(body)
+            if found_bot_id:
+                bot_id = found_bot_id
+                print(f'INFO: Using bot_id from recursive search: {bot_id}')
+        
+        print(f'INFO: Event="{event}", is_bot_webhook={is_bot_webhook}, bot_id={bot_id}, bot_status_code={bot_status_code}, recall_id={recall_id}')
+        
+        # SIMPLE CHECK: If we have bot_id, this is a bot webhook (handle it)
+        # Bot webhooks don't have calendar_id, so if bot_id exists, it's a bot webhook
+        if bot_id:
+            # This is a bot status webhook (bot.joining_call, bot.in_call_recording, bot.done, etc.)
+            print(f'INFO: ✅ BOT WEBHOOK DETECTED: bot_id={bot_id}, status_code={bot_status_code}, event={event}')
+            try:
+                from app.models import BotRecording
+                bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                
+                if bot_recording:
+                    print(f'INFO: Found BotRecording {bot_recording.id} for bot_id {bot_id}')
+                    print(f'INFO: Current status: {bot_recording.status}, recall_data: {bot_recording.recall_data}')
+                    
+                    # Try to fetch and store owner name if not already stored (OPTIONAL - fallback if fails)
+                    if bot_recording.backend_user_id and not (bot_recording.recall_data and bot_recording.recall_data.get('owner_name')):
+                        try:
+                            from app.logic.bot_creator import get_user_name_from_backend
+                            owner_name = get_user_name_from_backend(str(bot_recording.backend_user_id))
+                            if owner_name:
+                                if not bot_recording.recall_data:
+                                    bot_recording.recall_data = {}
+                                bot_recording.recall_data['owner_name'] = owner_name
+                                bot_recording.save(update_fields=['recall_data'])
+                                print(f'INFO: ✓ Stored owner name in BotRecording: {owner_name}')
+                        except Exception as e:
+                            # Silently fail - this is optional, bot will work without it
+                            pass
+                    
+                    # Map bot status codes to BotRecording status
+                    status_mapping = {
+                        'joining_call': 'joining',
+                        'in_waiting_room': 'joining',
+                        'in_call_not_recording': 'processing',
+                        'in_call_recording': 'processing',
+                        'call_ended': 'processing',  # Still processing until bot.done
+                        'done': 'completed',
+                    }
+                    
+                    new_status = status_mapping.get(bot_status_code, bot_recording.status)
+                    print(f'INFO: Mapping bot_status_code "{bot_status_code}" to new_status "{new_status}"')
+                    
+                    if new_status != bot_recording.status:
+                        old_status = bot_recording.status
+                        bot_recording.status = new_status
+                        bot_recording.save()
+                        print(f'INFO: ✅ Updated BotRecording {bot_recording.id} status: {old_status} → {new_status} (from webhook: {bot_status_code})')
+                    else:
+                        print(f'INFO: BotRecording status unchanged ({new_status}), skipping status update')
+                    
+                    # Store latest bot status in recall_data for real-time tracking
+                    if not bot_recording.recall_data:
+                        bot_recording.recall_data = {}
+                        print(f'INFO: Initialized empty recall_data for BotRecording {bot_recording.id}')
+                    
+                    if 'bot_status' not in bot_recording.recall_data:
+                        bot_recording.recall_data['bot_status'] = {}
+                    
+                    updated_at = body.get('data', {}).get('updated_at')
+                    bot_recording.recall_data['bot_status'][bot_status_code] = updated_at
+                    bot_recording.recall_data['latest_status'] = bot_status_code
+                    bot_recording.save()
+                    print(f'INFO: ✅ Updated BotRecording {bot_recording.id} latest_status to: {bot_status_code}, recall_data saved')
+                    
+                    # Verify the save worked
+                    bot_recording.refresh_from_db()
+                    print(f'INFO: Verified - BotRecording {bot_recording.id} status={bot_recording.status}, latest_status={bot_recording.recall_data.get("latest_status") if bot_recording.recall_data else None}')
+                    
+                    # If bot is done, also update MeetingTranscription status to 'completed'
+                    if bot_status_code == 'done':
+                        try:
+                            from app.models import MeetingTranscription
+                            # Update all transcriptions for this bot
+                            transcriptions = MeetingTranscription.objects.filter(
+                                bot_id=bot_id
+                            )
+                            if bot_recording.backend_user_id:
+                                transcriptions = transcriptions.filter(backend_user_id=bot_recording.backend_user_id)
+                            
+                            updated_count = 0
+                            for transcription in transcriptions:
+                                if transcription.status != 'completed':
+                                    transcription.status = 'completed'
+                                    transcription.save()
+                                    updated_count += 1
+                            
+                            if updated_count > 0:
+                                print(f'INFO: Updated {updated_count} MeetingTranscription record(s) status to completed (bot.done received for bot_id: {bot_id})')
+                        except Exception as e:
+                            print(f'WARNING: Failed to update MeetingTranscription status: {e}')
+                            import traceback
+                            traceback.print_exc()
+                else:
+                    print(f'WARNING: BotRecording not found for bot_id: {bot_id}')
+                    # Try to find by bot_id without backend_user_id filter
+                    all_bots = BotRecording.objects.filter(bot_id=bot_id)
+                    print(f'WARNING: Found {all_bots.count()} BotRecording(s) with bot_id {bot_id} (without backend_user_id filter)')
+                    if all_bots.exists():
+                        print(f'WARNING: BotRecording exists but backend_user_id might not match. Bot IDs: {[b.id for b in all_bots]}')
+            except Exception as e:
+                print(f'ERROR: Failed to update bot status: {e}')
+                import traceback
+                traceback.print_exc()
+            
             return HttpResponse(status=200)
         
+        # If we reach here, it's not a bot webhook, check if it's a calendar webhook
         if not recall_id:
-            print(f'WARNING: Webhook missing "calendar_id" in data. Ignoring.')
+            print(f'WARNING: Webhook missing "calendar_id" in data and no bot_id found. Ignoring.')
             return HttpResponse(status=200)
         
         # Verify calendar exists with retry logic for connection errors

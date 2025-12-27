@@ -105,8 +105,10 @@ def bot_webhook(request, bot_id=None):
         timestamp = (event_data.get("timestamp") or {}).get("absolute")
         participant = event_data.get("participant")
         participant_name = None
+        participant_id = None
         if isinstance(participant, dict):
             participant_name = participant.get("name") or participant.get("id")
+            participant_id = participant.get("id")  # Store participant ID for disambiguation
         
         # Handle different event types
         if event == "transcript.data" or event == "transcript.partial_data":
@@ -120,10 +122,12 @@ def bot_webhook(request, bot_id=None):
             participant = transcript_data.get("participant") or event_data.get("participant")
             transcript = transcript_data.get("transcript") or {}
             
-            # Get participant name
+            # Get participant name and ID
             participant_name = None
+            participant_id = None
             if isinstance(participant, dict):
                 participant_name = participant.get("name") or participant.get("id")
+                participant_id = participant.get("id")  # Store participant ID for disambiguation
             
             # Extract transcript text - try formatted text first, fall back to words (as per demo)
             transcript_text = ''
@@ -286,6 +290,7 @@ def bot_webhook(request, bot_id=None):
                                     'transcript_data': {
                                         'utterances': [{
                                             'speaker': participant_name,
+                                            'speaker_id': participant_id,  # Store participant ID for disambiguation
                                             'text': transcript_text,
                                             'start': timestamp,
                                             'words': words,
@@ -321,6 +326,7 @@ def bot_webhook(request, bot_id=None):
                                 if not utterance_exists:
                                     utterances.append({
                                         'speaker': participant_name,
+                                        'speaker_id': participant_id,  # Store participant ID for disambiguation
                                         'text': transcript_text,
                                         'start': timestamp,
                                         'words': words,
@@ -348,9 +354,27 @@ def bot_webhook(request, bot_id=None):
                                             time.sleep(30)
                                             
                                             try:
-                                                from app.models import MeetingTranscription, CalendarEvent
+                                                from app.models import MeetingTranscription, CalendarEvent, BotRecording
                                                 from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
                                                 from app.logic.bot_retriever import auto_retrieve_bot
+                                                
+                                                # SIMPLIFIED: Check BotRecording.status - if not 'completed', bot is still active
+                                                # Re-fetch bot_recording from database to get latest status
+                                                bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                                                if bot_recording:
+                                                    # Re-fetch to ensure we get latest data
+                                                    bot_recording = BotRecording.objects.get(id=bot_recording.id)
+                                                    bot_status = bot_recording.status
+                                                    
+                                                    print(f'[bot-wh] [DELAYED CHECK] Checking bot status: bot_status={bot_status}')
+                                                    
+                                                    # SIMPLE CHECK: If status is NOT 'completed', bot is still active
+                                                    if bot_status != 'completed':
+                                                        print(f'[bot-wh] [DELAYED CHECK] Bot is still active (status: {bot_status}), skipping summary generation')
+                                                        return  # Don't generate summary while bot is still in meeting
+                                                    
+                                                    # Bot status is 'completed', proceed with summary generation
+                                                        print(f'[bot-wh] [DELAYED CHECK] Bot is done (latest_status: {latest_status}, bot_status: {bot_status}), proceeding with summary generation')
                                                 
                                                 # Re-fetch transcription to check if summary already exists
                                                 transcription_check = MeetingTranscription.objects.filter(
@@ -361,7 +385,7 @@ def bot_webhook(request, bot_id=None):
                                                 if transcription_check:
                                                     # Only generate if summary doesn't exist yet
                                                     if not transcription_check.summary or len(transcription_check.summary.strip()) == 0:
-                                                        print(f'[bot-wh] [DELAYED CHECK] No summary found, generating with Groq...')
+                                                        print(f'[bot-wh] [DELAYED CHECK] Bot is done, no summary found, generating with Groq...')
                                                         
                                                         if transcription_check.transcript_text and len(transcription_check.transcript_text.strip()) > 0:
                                                             calendar_event_id = str(calendar_event.id)
@@ -429,6 +453,12 @@ def bot_webhook(request, bot_id=None):
                                                                 transcription_check.transcript_data = transcript_data
                                                                 transcription_check.save()
                                                                 
+                                                                # Update BotRecording.status to 'completed' to mark meeting as ended
+                                                                if bot_recording:
+                                                                    bot_recording.status = 'completed'
+                                                                    bot_recording.save()
+                                                                    print(f'[bot-wh] [DELAYED CHECK] ✓ Updated BotRecording.status to "completed" for bot {bot_id}')
+                                                                
                                                                 print(f'[bot-wh] [DELAYED CHECK] ✓ Generated and saved summary ({len(summary)} chars), {len(action_items)} action items, nudges, and impact score')
                                                                 print(f'[bot-wh] [DELAYED CHECK] ==========================================')
                                                                 print(f'[bot-wh] [DELAYED CHECK] ✅ TRANSCRIPTION PROCESSING COMPLETE (via delayed check)')
@@ -461,6 +491,180 @@ def bot_webhook(request, bot_id=None):
                 details = details[:500] + "…"
             print(f'[bot-wh] {event} ts={timestamp} who={participant_name} details={details}')
         
+            # Store participant information in transcription for real-time contextual nudges
+            if bot_id and (event == "participant_events.join" or event == "participant_events.leave"):
+                try:
+                    from app.models import CalendarEvent, MeetingTranscription, BotRecording
+                    
+                    # Find calendar event and transcription
+                    bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                    calendar_event = None
+                    if bot_recording and bot_recording.calendar_event_id:
+                        calendar_event = CalendarEvent.objects.filter(id=bot_recording.calendar_event_id).first()
+                    
+                    if not calendar_event:
+                        calendar_event = CalendarEvent.objects.filter(
+                            recall_data__bots__bot_id=bot_id
+                        ).first()
+                    
+                    if calendar_event:
+                        # Get or create transcription
+                        transcription, created = MeetingTranscription.objects.get_or_create(
+                            calendar_event_id=calendar_event.id,
+                            bot_id=bot_id,
+                            defaults={
+                                'backend_user_id': calendar_event.backend_user_id,
+                                'transcript_data': {'participants': []},
+                                'status': 'processing',
+                            }
+                        )
+                        
+                        # Update backend_user_id if not set
+                        if not transcription.backend_user_id and calendar_event.backend_user_id:
+                            transcription.backend_user_id = calendar_event.backend_user_id
+                        
+                        # Get or initialize participants list in transcript_data
+                        if 'participants' not in transcription.transcript_data:
+                            transcription.transcript_data['participants'] = []
+                        
+                        participants_list = transcription.transcript_data['participants']
+                        
+                        # Create participant entry
+                        participant_id = None  # Session ID (temporary, session-specific)
+                        persistent_id = None   # Platform-specific persistent ID (consistent across meetings)
+                        platform_type = None
+                        
+                        if isinstance(participant, dict):
+                            participant_id = participant.get("id")  # Session-specific ID
+                            platform_type = participant.get("platform", "unknown")
+                            extra_data = participant.get("extra_data", {})
+                            
+                            # Extract platform-specific persistent ID
+                            if platform_type == "zoom" and isinstance(extra_data.get("zoom"), dict):
+                                # Zoom: use conf_user_id (consistent across meetings)
+                                persistent_id = extra_data["zoom"].get("conf_user_id")
+                                if persistent_id:
+                                    print(f'[bot-wh] [PARTICIPANTS] Zoom participant - using conf_user_id: {persistent_id}')
+                            elif platform_type == "microsoft_teams" and isinstance(extra_data.get("microsoft_teams"), dict):
+                                # Teams: use user_id (consistent across meetings)
+                                persistent_id = extra_data["microsoft_teams"].get("user_id")
+                                if persistent_id:
+                                    print(f'[bot-wh] [PARTICIPANTS] Teams participant - using user_id: {persistent_id}')
+                            elif platform_type in ["desktop", "mobile_app"] and isinstance(extra_data.get("google_meet"), dict):
+                                # Google Meet: use static_participant_id (consistent across meetings)
+                                persistent_id = extra_data["google_meet"].get("static_participant_id")
+                                if persistent_id:
+                                    print(f'[bot-wh] [PARTICIPANTS] Google Meet participant - using static_participant_id: {persistent_id}')
+                        
+                        # Use persistent_id as primary identifier if available, fallback to session id
+                        primary_id = persistent_id if persistent_id else participant_id
+                        
+                        participant_entry = {
+                            'id': participant_id,  # Session ID (for reference)
+                            'persistent_id': persistent_id,  # Platform-specific persistent ID (for matching)
+                            'primary_id': primary_id,  # Primary identifier to use for matching
+                            'name': participant_name,
+                            'is_host': participant.get("is_host", False) if isinstance(participant, dict) else False,
+                            'platform': platform_type or (participant.get("platform", "unknown") if isinstance(participant, dict) else "unknown"),
+                            'joined_at': timestamp,
+                        }
+                        
+                        if event == "participant_events.join":
+                            # Add participant if not already in list
+                            # Check by primary_id (persistent_id or session id), otherwise check by name
+                            if primary_id is not None:
+                                existing = next((p for p in participants_list if p.get('primary_id') == primary_id or p.get('persistent_id') == primary_id or p.get('id') == primary_id), None)
+                            else:
+                                existing = next((p for p in participants_list if p.get('name') == participant_name), None)
+                            
+                            if not existing:
+                                participants_list.append(participant_entry)
+                                print(f'[bot-wh] [PARTICIPANTS] Added participant: {participant_name} (Session ID: {participant_id}, Persistent ID: {persistent_id or "N/A"})')
+                            else:
+                                # Update existing participant entry (in case session ID changed but persistent ID is same)
+                                existing.update(participant_entry)
+                                print(f'[bot-wh] [PARTICIPANTS] Updated participant: {participant_name} (Session ID: {participant_id}, Persistent ID: {persistent_id or "N/A"})')
+                        elif event == "participant_events.leave":
+                            # Remove participant from list
+                            # Remove by primary_id (persistent_id or session id), otherwise remove by name
+                            if primary_id is not None:
+                                participants_list[:] = [p for p in participants_list if not (p.get('primary_id') == primary_id or p.get('persistent_id') == primary_id or p.get('id') == primary_id)]
+                            else:
+                                participants_list[:] = [p for p in participants_list if p.get('name') != participant_name]
+                            print(f'[bot-wh] [PARTICIPANTS] Removed participant: {participant_name} (Session ID: {participant_id}, Persistent ID: {persistent_id or "N/A"})')
+                        
+                        # Update transcript_data
+                        transcription.transcript_data['participants'] = participants_list
+                        transcription.save()
+                        print(f'[bot-wh] [PARTICIPANTS] Updated participant list: {len(participants_list)} participants')
+                        
+                except Exception as e:
+                    print(f'[bot-wh] [PARTICIPANTS] Error updating participant list: {e}')
+                    import traceback
+                    traceback.print_exc()
+        
+            # Check if account owner left - if so, make bot leave (FALLBACK: if owner_name not stored, bot stays)
+            if event == "participant_events.leave" and bot_id and participant_name:
+                try:
+                    from app.models import BotRecording
+                    from app.services.recall.service import get_service
+                    import os
+                    
+                    # Get bot recording to find owner
+                    bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                    
+                    if bot_recording and bot_recording.backend_user_id:
+                        # Get stored owner name from recall_data (OPTIONAL - may not exist)
+                        owner_name = None
+                        if bot_recording.recall_data and isinstance(bot_recording.recall_data, dict):
+                            owner_name = bot_recording.recall_data.get('owner_name')
+                        
+                        # Only check if owner_name is stored (FALLBACK: if not stored, bot stays - current behavior)
+                        if owner_name:
+                            # Normalize names for comparison (trim whitespace, case-insensitive)
+                            leaving_name = participant_name.strip()
+                            owner_name_normalized = owner_name.strip()
+                            
+                            # Check if account owner left (exact match)
+                            if leaving_name.lower() == owner_name_normalized.lower():
+                                print(f'[bot-wh] [OWNER LEAVE] ⚠ Account owner ({owner_name}) left the meeting')
+                                print(f'[bot-wh] [OWNER LEAVE] Making bot leave the call...')
+                                
+                                try:
+                                    # Get region from environment or use default
+                                    recall_region = os.getenv('RECALL_REGION', 'us-west-2')
+                                    
+                                    # Call Recall.ai API to make bot leave the call
+                                    recall_service = get_service()
+                                    recall_service.leave_bot_call(bot_id, region=recall_region)
+                                    
+                                    print(f'[bot-wh] [OWNER LEAVE] ✓ Successfully called leave_bot_call API for bot_id: {bot_id}')
+                                    
+                                    # Mark bot recording as completed
+                                    bot_recording.status = 'completed'
+                                    bot_recording.save()
+                                    print(f'[bot-wh] [OWNER LEAVE] ✓ Bot recording marked as completed')
+                                except Exception as api_error:
+                                    # If API call fails, still mark as completed (bot will stop naturally)
+                                    print(f'[bot-wh] [OWNER LEAVE] ⚠ API call failed (non-fatal): {api_error}')
+                                    print(f'[bot-wh] [OWNER LEAVE] Marking bot as completed anyway...')
+                                    bot_recording.status = 'completed'
+                                    bot_recording.save()
+                                    import traceback
+                                    traceback.print_exc()
+                            else:
+                                print(f'[bot-wh] [PARTICIPANT LEAVE] Non-owner participant left ({participant_name}), bot stays in meeting')
+                        else:
+                            # FALLBACK: Owner name not stored - bot continues as normal (current behavior)
+                            print(f'[bot-wh] [PARTICIPANT LEAVE] Participant left ({participant_name}), owner name not stored - bot stays (fallback: works as before)')
+                    else:
+                        print(f'[bot-wh] [PARTICIPANT LEAVE] BotRecording not found or no backend_user_id - bot stays')
+                except Exception as e:
+                    # Non-fatal error - don't break the webhook processing
+                    print(f'[bot-wh] [OWNER LEAVE] Error checking owner leave (non-fatal, continuing): {e}')
+                    import traceback
+                    traceback.print_exc()
+            
             # If participant leaves and it's the last participant, check if bot is done
             if event == "participant_events.leave" and bot_id:
                 # Check if we should trigger transcript fetch (fallback if bot.done never comes)
@@ -595,6 +799,14 @@ def bot_webhook(request, bot_id=None):
                                                         transcript_data['action_items'] = action_items
                                                         existing_transcription.transcript_data = transcript_data
                                                         existing_transcription.save()
+                                                        
+                                                        # Update BotRecording.status to 'completed' to mark meeting as ended
+                                                        bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                                                        if bot_recording:
+                                                            bot_recording.status = 'completed'
+                                                            bot_recording.save()
+                                                            print(f'[bot-wh] [FALLBACK] ✓ Updated BotRecording.status to "completed" for bot {bot_id}')
+                                                        
                                                         print(f'[bot-wh] [FALLBACK] ✓ Updated transcription with summary, action items, nudges, and impact score')
                                                     else:
                                                         # Create new transcription record
@@ -672,9 +884,19 @@ def bot_webhook(request, bot_id=None):
                     try:
                         # Import here to avoid circular imports
                         from app.logic.bot_retriever import auto_retrieve_bot
-                        from app.models import CalendarEvent
+                        from app.models import CalendarEvent, BotRecording
                         from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
                         from app.services.recall.service import get_service
+                        
+                        # CRITICAL: Update BotRecording.status to 'completed' when bot.done is received
+                        # This ensures contextual nudges API won't treat this bot as live
+                        bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                        if bot_recording:
+                            bot_recording.status = 'completed'
+                            bot_recording.save()
+                            print(f'[bot-wh] ✓ Updated BotRecording.status to "completed" for bot {bot_id}')
+                        else:
+                            print(f'[bot-wh] ⚠ WARNING: BotRecording not found for bot {bot_id}, cannot update status')
                         
                         # Find calendar event with this bot_id
                         calendar_event = CalendarEvent.objects.filter(
@@ -790,6 +1012,9 @@ def bot_webhook(request, bot_id=None):
                                                     existing_transcription.status = 'completed'
                                                     existing_transcription.transcript_data = transcript_data
                                                     existing_transcription.save()
+                                                    
+                                                    # BotRecording.status is already updated at the beginning of bot.done handler
+                                                    # So we don't need to update it again here
                                                     
                                                     print(f'[bot-wh] [BACKGROUND] ✓ Saved transcription with summary, action items, nudges, and impact score')
                                                     print(f'[bot-wh] [BACKGROUND] ==========================================')

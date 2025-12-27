@@ -562,12 +562,15 @@ def api_join_meeting_immediately(request):
         
         meeting_url = data.get('meeting_url') or data.get('meetingUrl') or data.get('link')
         meeting_password = data.get('meeting_password') or data.get('meetingPassword') or data.get('password')
+        meeting_name = data.get('meeting_name') or data.get('meetingName') or data.get('title')
         
         if not meeting_url:
             response = JsonResponse({'error': 'meeting_url is required'}, status=400)
             return add_cors_headers(response, request)
         
         print(f'[api_join_meeting] Creating bot for meeting_url: {meeting_url[:50]}...')
+        if meeting_name:
+            print(f'[api_join_meeting] Meeting name provided: {meeting_name}')
         
         # Import the function to create bot immediately
         from app.logic.bot_creator import create_bot_immediately
@@ -577,7 +580,8 @@ def api_join_meeting_immediately(request):
         result = create_bot_immediately(
             meeting_url=meeting_url, 
             meeting_password=meeting_password,
-            backend_user_id=backend_user_id
+            backend_user_id=backend_user_id,
+            meeting_name=meeting_name
         )
         
         print(f'[api_join_meeting] Bot creation result: success={result.get("success")}, bot_id={result.get("bot_id")}')

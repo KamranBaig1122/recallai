@@ -1,15 +1,24 @@
 """
 Chat API endpoint for Ellie bot
 Uses Groq API with meeting context
+Optimized to reduce API calls with caching
 """
 import os
 import re
 import json
+import hashlib
+from datetime import timedelta
 from django.http import JsonResponse
+from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from app.views.calendar_api import add_cors_headers, get_backend_user_id_from_request
 from app.logic.chat_context import analyze_question_intent, build_meeting_context
+
+# Simple in-memory response cache (to reduce Groq API calls)
+_response_cache = {}
+_cache_expiry = timedelta(minutes=5)  # Cache responses for 5 minutes
+_cache_max_size = 50  # Maximum cached responses
 
 try:
     from groq import Groq
@@ -133,18 +142,49 @@ def clean_response(text):
     return text
 
 
-def build_system_prompt(meeting_context: str) -> str:
+def build_system_prompt(meeting_context: str, question_intent: dict) -> str:
     """Build system prompt with optional meeting context"""
     prompt = BASE_SYSTEM_PROMPT
     
     if meeting_context:
-        prompt += f"""
+        # Add specific instructions based on question type
+        if question_intent.get('live_meeting_only'):
+            prompt += f"""
 
-\n\n=== MEETING CONTEXT (Use this when questions are about meetings) ===
+\n\n=== LIVE MEETING CONTEXT (Currently happening) ===
+{meeting_context}
+=== END LIVE MEETING CONTEXT ===
+
+The user is asking about the CURRENTLY LIVE meeting. Use the live meeting transcript above to answer.
+Focus on what's happening right now in the live meeting."""
+        elif question_intent.get('person_filter'):
+            person_name = question_intent['person_filter']
+            prompt += f"""
+
+\n\n=== MEETING CONTEXT (Filtered by participant: {person_name}) ===
 {meeting_context}
 === END MEETING CONTEXT ===
 
-When asked about meetings, use the context above. Reference meetings by title or date.
+The user is asking about meetings with {person_name}. Use the filtered meetings above.
+Reference meetings by title, date, and participants."""
+        elif question_intent.get('date_filter'):
+            date_info = question_intent['date_filter']
+            prompt += f"""
+
+\n\n=== MEETING CONTEXT (Filtered by date: {date_info.get('type', 'date')}) ===
+{meeting_context}
+=== END MEETING CONTEXT ===
+
+The user is asking about meetings on a specific date/time. Use the filtered meetings above.
+Reference meetings by title, date, and what was discussed."""
+        else:
+            prompt += f"""
+
+\n\n=== MEETING CONTEXT (All relevant meetings) ===
+{meeting_context}
+=== END MEETING CONTEXT ===
+
+When asked about meetings, use the context above. Reference meetings by title, date, or participants.
 For general questions, ignore the meeting context and answer from your knowledge."""
     
     return prompt
@@ -191,6 +231,10 @@ def api_chat(request):
         question_intent = analyze_question_intent(user_message)
         print(f'[ChatAPI] Question type: {question_intent["question_type"]}')
         print(f'[ChatAPI] Needs meeting context: {question_intent["needs_meeting_context"]}')
+        if question_intent.get('person_filter'):
+            print(f'[ChatAPI] Person filter: {question_intent["person_filter"]}')
+        if question_intent.get('date_filter'):
+            print(f'[ChatAPI] Date filter: {question_intent["date_filter"]}')
         
         # Build meeting context (only if needed)
         meeting_context_data = {
@@ -201,12 +245,12 @@ def api_chat(request):
         
         if question_intent['needs_meeting_context'] and backend_user_id:
             meeting_context_data = build_meeting_context(backend_user_id, question_intent)
-            print(f'[ChatAPI] Meeting context built')
+            print(f'[ChatAPI] Meeting context built (length: {len(meeting_context_data["context_text"])} chars)')
             print(f'[ChatAPI] Has live meetings: {meeting_context_data["has_live_meetings"]}')
             print(f'[ChatAPI] Live meeting count: {meeting_context_data["live_meeting_count"]}')
         
         # Build system prompt
-        system_prompt = build_system_prompt(meeting_context_data['context_text'])
+        system_prompt = build_system_prompt(meeting_context_data['context_text'], question_intent)
         
         # Check if Groq is available
         if Groq is None:
@@ -227,43 +271,93 @@ def api_chat(request):
         
         groq_client = Groq(api_key=groq_api_key)
         
-        # Build messages for Groq
-        messages = [{"role": "system", "content": system_prompt}]
+        # Check cache first (to reduce API calls)
+        cache_key = None
+        if backend_user_id:
+            # Create cache key from user_id, message, and context hash
+            context_hash = hashlib.md5(meeting_context_data['context_text'].encode()).hexdigest()[:8]
+            cache_key_data = f"{backend_user_id}:{user_message}:{context_hash}"
+            cache_key = hashlib.md5(cache_key_data.encode()).hexdigest()
+            
+            # Check if cached response exists and is still valid
+            if cache_key in _response_cache:
+                cached_data = _response_cache[cache_key]
+                cache_age = timezone.now() - cached_data['timestamp']
+                if cache_age < _cache_expiry:
+                    print(f'[ChatAPI] Using cached response (age: {cache_age.total_seconds():.1f}s)')
+                    response_text = cached_data['response']
+                else:
+                    # Expired cache entry
+                    del _response_cache[cache_key]
+                    cache_key = None
         
-        # Add conversation history (last 10 messages)
-        for msg in conversation_history[-10:]:
-            if msg.get('sender') == 'user':
-                messages.append({"role": "user", "content": msg.get('text', '')})
-            elif msg.get('sender') == 'ellie':
-                messages.append({"role": "assistant", "content": msg.get('text', '')})
-        
-        # Add current message
-        messages.append({"role": "user", "content": user_message})
-        
-        print(f'[ChatAPI] Calling Groq API...')
-        
-        # Call Groq API
-        chat_completion = groq_client.chat.completions.create(
-            messages=messages,
-            model="llama-3.3-70b-versatile",
-            temperature=0.7,
-            max_tokens=150,  # Limited to enforce concise responses
-        )
-        
-        # Extract response
-        response_text = chat_completion.choices[0].message.content
-        
-        # Clean response
-        response_text = clean_response(response_text)
+        # Call Groq API only if not cached
+        if cache_key is None or cache_key not in _response_cache:
+            # Build messages for Groq
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # Add conversation history (last 5 messages to reduce token usage)
+            for msg in conversation_history[-5:]:
+                if msg.get('sender') == 'user':
+                    messages.append({"role": "user", "content": msg.get('text', '')})
+                elif msg.get('sender') == 'ellie':
+                    messages.append({"role": "assistant", "content": msg.get('text', '')})
+            
+            # Add current message
+            messages.append({"role": "user", "content": user_message})
+            
+            print(f'[ChatAPI] Calling Groq API (messages: {len(messages)}, context length: {len(meeting_context_data["context_text"])})...')
+            
+            # Call Groq API
+            chat_completion = groq_client.chat.completions.create(
+                messages=messages,
+                model="llama-3.3-70b-versatile",
+                temperature=0.6,  # Slightly lower for more consistent responses
+                max_tokens=150,  # Limited to enforce concise responses
+            )
+            
+            # Extract response
+            response_text = chat_completion.choices[0].message.content
+            
+            # Clean response
+            response_text = clean_response(response_text)
+            
+            # Cache the response
+            if backend_user_id and cache_key:
+                # Limit cache size
+                if len(_response_cache) >= _cache_max_size:
+                    # Remove oldest entries (simple approach: clear 20% oldest)
+                    sorted_entries = sorted(_response_cache.items(), key=lambda x: x[1]['timestamp'])
+                    for old_key, _ in sorted_entries[:_cache_max_size // 5]:
+                        del _response_cache[old_key]
+                
+                _response_cache[cache_key] = {
+                    'response': response_text,
+                    'timestamp': timezone.now()
+                }
+                print(f'[ChatAPI] Response cached')
         
         print(f'[ChatAPI] Response generated: {response_text[:100]}...')
         print(f'[ChatAPI] ==========================================')
+        
+        # Get bot_id from live meeting if available (for contextual nudges)
+        bot_id = None
+        if meeting_context_data['has_live_meetings'] and backend_user_id:
+            # Get the most recent live meeting transcription to extract bot_id
+            from app.models import MeetingTranscription
+            live_transcription = MeetingTranscription.objects.filter(
+                backend_user_id=backend_user_id,
+                status='processing'
+            ).order_by('-updated_at').first()
+            if live_transcription:
+                bot_id = live_transcription.bot_id
         
         response = JsonResponse({
             'response': response_text,
             'success': True,
             'has_live_meetings': meeting_context_data['has_live_meetings'],
-            'live_meeting_count': meeting_context_data['live_meeting_count']
+            'live_meeting_count': meeting_context_data['live_meeting_count'],
+            'bot_id': bot_id  # Include bot_id for contextual nudges
         })
         return add_cors_headers(response, request)
         
