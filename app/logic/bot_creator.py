@@ -31,8 +31,11 @@ def get_user_name_from_backend(backend_user_id: str) -> str | None:
             return None
         
         # Use the same endpoint format as auth.py: /api/accounts/me/
+        from app.logic.backend_auth import get_backend_api_headers
         api_url = f'{api_base_url}/api/accounts/me/'
-        headers = {'X-User-ID': backend_user_id}
+        headers = get_backend_api_headers({
+            'X-User-ID': backend_user_id,  # Still include X-User-ID for user context
+        })
         
         print(f'[bot_creator] Fetching user name from: {api_url}')
         print(f'[bot_creator] Headers: X-User-ID={backend_user_id}')
@@ -73,13 +76,15 @@ def get_user_name_from_backend(backend_user_id: str) -> str | None:
     return None
 
 
-def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
+def create_bot_for_event(event: CalendarEvent, force: bool = False, workspace_id: str = None, folder_id: str = None) -> dict:
     """
     Create a meeting bot for a calendar event with scheduled join time
     
     Args:
         event: CalendarEvent instance
         force: If True, create bot even if one already exists
+        workspace_id: Optional workspace ID from Invite-ellie-backend (if None, will try to get from event)
+        folder_id: Optional folder ID from Invite-ellie-backend (if None, meeting goes to unresolved)
         
     Returns:
         dict with 'success', 'bot_id', 'join_at', and 'error' keys
@@ -187,6 +192,14 @@ def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
                         recall_data_dict = {}
                     recall_data_dict['owner_name'] = owner_name
                 
+                # If workspace_id not provided, try to get from event's calendar
+                # For scheduled bots, workspace_id might come from calendar connection
+                final_workspace_id = workspace_id
+                if not final_workspace_id and event.backend_user_id:
+                    # Try to get workspace from user's email domain (future enhancement)
+                    # For now, we'll require workspace_id to be passed
+                    pass
+                
                 bot_recording, created = BotRecording.objects.update_or_create(
                     bot_id=bot_id,
                     defaults={
@@ -194,6 +207,8 @@ def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
                         'status': 'pending',
                         'calendar_event_id': event.id,
                         'backend_user_id': event.backend_user_id,
+                        'workspace_id': final_workspace_id,  # Required - None means unresolved
+                        'folder_id': folder_id,  # Optional - None means unresolved
                     }
                 )
                 
@@ -230,7 +245,7 @@ def create_bot_for_event(event: CalendarEvent, force: bool = False) -> dict:
         }
 
 
-def create_bot_immediately(meeting_url: str, meeting_password: str = None, backend_user_id: str = None, meeting_name: str = None) -> dict:
+def create_bot_immediately(meeting_url: str, meeting_password: str = None, backend_user_id: str = None, meeting_name: str = None, workspace_id: str = None, folder_id: str = None) -> dict:
     """
     Create a meeting bot that joins immediately (without join_at)
     
@@ -239,6 +254,8 @@ def create_bot_immediately(meeting_url: str, meeting_password: str = None, backe
         meeting_password: Optional meeting password if required
         backend_user_id: Optional backend user ID to associate with the bot
         meeting_name: Optional meeting name/title to use for the CalendarEvent
+        workspace_id: Required workspace ID from Invite-ellie-backend
+        folder_id: Optional folder ID from Invite-ellie-backend (if None, meeting goes to unresolved)
         
     Returns:
         dict with 'success', 'bot_id', and 'error' keys
@@ -282,6 +299,11 @@ def create_bot_immediately(meeting_url: str, meeting_password: str = None, backe
         if bot_id:
             print(f'[BotCreator] Bot created successfully: {bot_id}')
             print(f'[BotCreator] backend_user_id: {backend_user_id}')
+            print(f'[BotCreator] workspace_id: {workspace_id}')
+            if folder_id:
+                print(f'[BotCreator] folder_id: {folder_id}')
+            else:
+                print(f'[BotCreator] No folder_id - meeting will go to unresolved')
             
             # Create a CalendarEvent for manually joined bots so transcriptions can be processed
             # This allows the webhook to find the event and process transcriptions properly
@@ -386,6 +408,8 @@ def create_bot_immediately(meeting_url: str, meeting_password: str = None, backe
                         'status': 'joining',  # Bot is joining immediately
                         'calendar_event_id': calendar_event.id if calendar_event else None,
                         'backend_user_id': backend_user_id,
+                        'workspace_id': workspace_id,  # Required - always set
+                        'folder_id': folder_id,  # Optional - None means unresolved
                     }
                 )
                 

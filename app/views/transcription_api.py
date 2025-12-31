@@ -5,7 +5,7 @@ import json
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
-from app.models import Calendar, CalendarEvent, MeetingTranscription
+from app.models import Calendar, CalendarEvent, MeetingTranscription, BotRecording, RecordingArtifact
 from app.views.calendar_api import add_cors_headers, get_backend_user_id_from_request
 
 
@@ -142,14 +142,141 @@ def api_list_transcriptions(request):
         return add_cors_headers(response, request)
 
 
-@require_http_methods(["GET", "OPTIONS"])
+def api_delete_transcription(request, transcription_id):
+    """
+    Delete a transcription and all associated meeting data.
+    This deletes:
+    - MeetingTranscription (transcript, summary, action items, nudges, impact score)
+    - BotRecording (associated bot recording)
+    - RecordingArtifact (any downloaded artifacts)
+    """
+    try:
+        # Get backend_user_id from request
+        backend_user_id = get_backend_user_id_from_request(request)
+        if not backend_user_id:
+            response = JsonResponse({'error': 'Authentication required. Provide JWT token or userId parameter'}, status=400)
+            return add_cors_headers(response, request)
+        
+        print(f'[TranscriptionAPI] DELETE request for transcription {transcription_id} by user {backend_user_id}')
+        
+        # Get the transcription
+        try:
+            transcription = MeetingTranscription.objects.get(id=transcription_id)
+        except MeetingTranscription.DoesNotExist:
+            response = JsonResponse({'error': 'Transcription not found'}, status=404)
+            return add_cors_headers(response, request)
+        
+        # Verify ownership (similar to api_get_transcription)
+        transcription_user_id = str(transcription.backend_user_id) if transcription.backend_user_id else None
+        request_user_id = str(backend_user_id)
+        
+        is_owned = False
+        
+        # Method 1: Direct backend_user_id match
+        if transcription_user_id and transcription_user_id == request_user_id:
+            is_owned = True
+        
+        # Method 2: Check via calendar events (for old meetings without backend_user_id)
+        if not is_owned:
+            try:
+                event = CalendarEvent.objects.get(id=transcription.calendar_event_id)
+                
+                # Check if event has backend_user_id matching
+                if event.backend_user_id and str(event.backend_user_id) == request_user_id:
+                    is_owned = True
+                
+                # Check via calendar ownership
+                if not is_owned and event.calendar_id:
+                    try:
+                        calendar = Calendar.objects.get(id=event.calendar_id)
+                        if calendar.backend_user_id and str(calendar.backend_user_id) == request_user_id:
+                            is_owned = True
+                        elif calendar.user_id and str(calendar.user_id) == request_user_id:
+                            is_owned = True
+                    except Calendar.DoesNotExist:
+                        pass
+            except CalendarEvent.DoesNotExist:
+                pass
+            except Exception as e:
+                print(f'[TranscriptionAPI] Error checking calendar ownership: {e}')
+        
+        if not is_owned:
+            print(f'[TranscriptionAPI] ❌ Ownership check failed: transcription.backend_user_id={transcription_user_id}, request.backend_user_id={request_user_id}')
+            response = JsonResponse({'error': 'Unauthorized: Transcription does not belong to user'}, status=403)
+            return add_cors_headers(response, request)
+        
+        print(f'[TranscriptionAPI] ✓ Ownership verified, proceeding with deletion')
+        
+        # Get related data before deletion
+        bot_id = transcription.bot_id
+        calendar_event_id = transcription.calendar_event_id
+        
+        # 1. Delete RecordingArtifacts (foreign key constraint - must delete first)
+        # Get BotRecording IDs first
+        bot_recording_ids = list(BotRecording.objects.filter(bot_id=bot_id).values_list('id', flat=True))
+        artifacts = RecordingArtifact.objects.filter(bot_recording_id__in=bot_recording_ids)
+        artifacts_count = artifacts.count()
+        artifacts.delete()
+        print(f'[TranscriptionAPI] ✓ Deleted {artifacts_count} recording artifact(s)')
+        
+        # 2. Delete BotRecording(s) associated with this bot_id
+        bot_recordings = BotRecording.objects.filter(bot_id=bot_id)
+        bot_recordings_count = bot_recordings.count()
+        bot_recordings.delete()
+        print(f'[TranscriptionAPI] ✓ Deleted {bot_recordings_count} bot recording(s)')
+        
+        # 3. Delete MeetingTranscription
+        transcription.delete()
+        print(f'[TranscriptionAPI] ✓ Deleted meeting transcription')
+        
+        # 4. Optionally delete CalendarEvent if it's a manual meeting and has no other transcriptions
+        try:
+            event = CalendarEvent.objects.get(id=calendar_event_id)
+            # Check if this event has any other transcriptions
+            other_transcriptions = MeetingTranscription.objects.filter(calendar_event_id=calendar_event_id)
+            if other_transcriptions.count() == 0:
+                # Check if it's a manual meeting (has a calendar but might be disconnected)
+                # For now, we'll keep the event as it might be useful for history
+                # Uncomment below if you want to delete the event too:
+                # event.delete()
+                # print(f'[TranscriptionAPI] ✓ Deleted calendar event (manual meeting)')
+                print(f'[TranscriptionAPI] Keeping calendar event (may have historical value)')
+        except CalendarEvent.DoesNotExist:
+            print(f'[TranscriptionAPI] Calendar event not found (may have been deleted already)')
+        
+        print(f'[TranscriptionAPI] ✅ Successfully deleted all data for transcription {transcription_id}')
+        response = JsonResponse({
+            'success': True,
+            'message': 'Meeting data deleted successfully',
+            'transcription_id': str(transcription_id),
+            'deleted': {
+                'transcription': True,
+                'bot_recordings': bot_recordings_count,
+                'recording_artifacts': artifacts_count,
+            }
+        })
+        return add_cors_headers(response, request)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f'[TranscriptionAPI] ❌ Error deleting transcription: {e}')
+        response = JsonResponse({'error': str(e)}, status=500)
+        return add_cors_headers(response, request)
+
+
+@require_http_methods(["GET", "DELETE", "OPTIONS"])
 @csrf_exempt
 def api_get_transcription(request, transcription_id):
-    """Get a specific transcription by ID"""
+    """Get a specific transcription by ID, or delete it and all associated data"""
     if request.method == 'OPTIONS':
         response = JsonResponse({})
         return add_cors_headers(response, request)
     
+    # Handle DELETE request
+    if request.method == 'DELETE':
+        return api_delete_transcription(request, transcription_id)
+    
+    # Handle GET request
     try:
         # Get backend_user_id from request (JWT token or query param)
         backend_user_id = get_backend_user_id_from_request(request)

@@ -8,6 +8,8 @@ from app.logic.auth import get_user_from_auth_token
 from app.logic.sync import sync_calendar_events
 from app.services.recall.service import get_service
 from datetime import datetime
+import os
+import requests
 
 
 def add_cors_headers(response, request=None):
@@ -49,6 +51,52 @@ def add_cors_headers(response, request=None):
     response['Access-Control-Max-Age'] = '3600'  # Cache preflight for 1 hour
     print(f'Responding with allowed headers: {allowed_headers}')
     return response
+
+
+def _get_workspace_id_from_email(email: str, backend_user_id: str) -> str | None:
+    """
+    Get workspace_id from user's email domain by calling Invite-ellie-backend API.
+    Returns None if workspace cannot be determined.
+    """
+    try:
+        api_base_url = os.environ.get('INVITE_ELLIE_BACKEND_API_URL', 'http://localhost:8000')
+        if not api_base_url:
+            print(f'[calendar_api] ⚠ INVITE_ELLIE_BACKEND_API_URL not set, cannot get workspace_id')
+            return None
+        
+        # Extract domain from email
+        domain = email.split('@')[-1] if '@' in email else None
+        if not domain:
+            return None
+        
+        # Determine workspace name from domain
+        personal_domains = ['gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com']
+        if domain.lower() in personal_domains:
+            workspace_name = 'Personal'
+        else:
+            # Use domain name as workspace name (capitalize first letter)
+            workspace_name = domain.split('.')[0].capitalize()
+        
+        # Get user's workspaces from Invite-ellie-backend
+        from app.logic.backend_auth import get_backend_api_headers
+        api_url = f'{api_base_url}/api/workspaces/'
+        headers = get_backend_api_headers({
+            'X-User-ID': backend_user_id,  # Still include X-User-ID for user context
+        })
+        
+        response = requests.get(api_url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            workspaces = response.json()
+            # Find workspace by name (case-insensitive)
+            for workspace in workspaces.get('results', []):
+                if workspace.get('name', '').lower() == workspace_name.lower():
+                    return workspace.get('id')
+        
+        print(f'[calendar_api] ⚠ Could not find workspace "{workspace_name}" for user {backend_user_id}')
+        return None
+    except Exception as e:
+        print(f'[calendar_api] ⚠ Error getting workspace_id from email: {e}')
+        return None
 
 
 def get_backend_user_id_from_request(request, userId=None):
@@ -168,9 +216,20 @@ def api_get_connect_urls(request):
         response = JsonResponse({'error': 'Authentication required. Provide JWT token or userId parameter'}, status=400)
         return add_cors_headers(response, request)
     
+    # Get optional folder_id and workspace_id from query params
+    folder_id = request.GET.get('folderId')
+    workspace_id = request.GET.get('workspaceId')
+    
+    # Build state with user ID and optional folder/workspace preferences
+    state = {'userId': backend_user_id}
+    if folder_id:
+        state['folderId'] = folder_id
+    if workspace_id:
+        state['workspaceId'] = workspace_id
+    
     try:
-        google_url = build_google_calendar_oauth_url({'userId': backend_user_id})
-        microsoft_url = build_microsoft_outlook_oauth_url({'userId': backend_user_id})
+        google_url = build_google_calendar_oauth_url(state)
+        microsoft_url = build_microsoft_outlook_oauth_url(state)
         
         response = JsonResponse({
             'googleCalendar': google_url,
@@ -299,6 +358,10 @@ def api_update_calendar(request, calendar_id):
             calendar.auto_record_external_events = data['auto_record_external_events']
         if 'auto_record_only_confirmed_events' in data:
             calendar.auto_record_only_confirmed_events = data['auto_record_only_confirmed_events']
+        if 'default_folder_id' in data:
+            calendar.default_folder_id = data['default_folder_id'] if data['default_folder_id'] else None
+        if 'default_workspace_id' in data:
+            calendar.default_workspace_id = data['default_workspace_id'] if data['default_workspace_id'] else None
         
         calendar.save()
         
@@ -505,10 +568,26 @@ def api_create_bot_for_event(request, event_id):
             response = JsonResponse({'error': 'Calendar does not belong to this user'}, status=403)
             return add_cors_headers(response, request)
         
+        # Parse request body for workspace_id and folder_id (optional)
+        try:
+            request_data = json.loads(request.body) if request.body else {}
+        except json.JSONDecodeError:
+            request_data = {}
+        
+        workspace_id = request_data.get('workspace_id') or request_data.get('workspaceId')
+        folder_id = request_data.get('folder_id') or request_data.get('folderId')
+        
+        # If workspace_id not provided, try to get from calendar email domain
+        if not workspace_id and calendar.email:
+            try:
+                workspace_id = _get_workspace_id_from_email(calendar.email, backend_user_id)
+            except Exception as e:
+                print(f'[api_create_bot_for_event] Could not get workspace_id from email: {e}')
+        
         # Create bot for event
         # Allow creating bots for past meetings (meetings synced after calendar connection)
         # Note: Bots for past meetings won't be able to join, but can be created for record-keeping
-        result = create_bot_for_event(event, force=True)
+        result = create_bot_for_event(event, force=True, workspace_id=workspace_id, folder_id=folder_id)
         
         if result['success']:
             response = JsonResponse({
@@ -563,14 +642,25 @@ def api_join_meeting_immediately(request):
         meeting_url = data.get('meeting_url') or data.get('meetingUrl') or data.get('link')
         meeting_password = data.get('meeting_password') or data.get('meetingPassword') or data.get('password')
         meeting_name = data.get('meeting_name') or data.get('meetingName') or data.get('title')
+        workspace_id = data.get('workspace_id') or data.get('workspaceId')
+        folder_id = data.get('folder_id') or data.get('folderId')  # Optional
         
         if not meeting_url:
             response = JsonResponse({'error': 'meeting_url is required'}, status=400)
             return add_cors_headers(response, request)
         
+        if not workspace_id:
+            response = JsonResponse({'error': 'workspace_id is required'}, status=400)
+            return add_cors_headers(response, request)
+        
         print(f'[api_join_meeting] Creating bot for meeting_url: {meeting_url[:50]}...')
         if meeting_name:
             print(f'[api_join_meeting] Meeting name provided: {meeting_name}')
+        print(f'[api_join_meeting] Workspace ID: {workspace_id}')
+        if folder_id:
+            print(f'[api_join_meeting] Folder ID: {folder_id}')
+        else:
+            print(f'[api_join_meeting] No folder ID provided - meeting will go to unresolved')
         
         # Import the function to create bot immediately
         from app.logic.bot_creator import create_bot_immediately
@@ -581,7 +671,9 @@ def api_join_meeting_immediately(request):
             meeting_url=meeting_url, 
             meeting_password=meeting_password,
             backend_user_id=backend_user_id,
-            meeting_name=meeting_name
+            meeting_name=meeting_name,
+            workspace_id=workspace_id,
+            folder_id=folder_id
         )
         
         print(f'[api_join_meeting] Bot creation result: success={result.get("success")}, bot_id={result.get("bot_id")}')

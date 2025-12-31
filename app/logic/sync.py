@@ -6,6 +6,54 @@ from datetime import datetime, timedelta
 from app.models import Calendar, CalendarEvent
 from app.services.recall.service import get_service
 import traceback
+import os
+import requests
+
+
+def _get_workspace_id_from_email(email: str, backend_user_id: str) -> str | None:
+    """
+    Get workspace_id from user's email domain by calling Invite-ellie-backend API.
+    Returns None if workspace cannot be determined.
+    """
+    try:
+        api_base_url = os.environ.get('INVITE_ELLIE_BACKEND_API_URL', 'http://localhost:8000')
+        if not api_base_url:
+            print(f'[sync] ⚠ INVITE_ELLIE_BACKEND_API_URL not set, cannot get workspace_id')
+            return None
+        
+        # Extract domain from email
+        domain = email.split('@')[-1] if '@' in email else None
+        if not domain:
+            return None
+        
+        # Determine workspace name from domain
+        personal_domains = ['gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com']
+        if domain.lower() in personal_domains:
+            workspace_name = 'Personal'
+        else:
+            # Use domain name as workspace name (capitalize first letter)
+            workspace_name = domain.split('.')[0].capitalize()
+        
+        # Get user's workspaces from Invite-ellie-backend
+        from app.logic.backend_auth import get_backend_api_headers
+        api_url = f'{api_base_url}/api/workspaces/'
+        headers = get_backend_api_headers({
+            'X-User-ID': backend_user_id,  # Still include X-User-ID for user context
+        })
+        
+        response = requests.get(api_url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            workspaces = response.json()
+            # Find workspace by name (case-insensitive)
+            for workspace in workspaces.get('results', []):
+                if workspace.get('name', '').lower() == workspace_name.lower():
+                    return workspace.get('id')
+        
+        print(f'[sync] ⚠ Could not find workspace "{workspace_name}" for user {backend_user_id}')
+        return None
+    except Exception as e:
+        print(f'[sync] ⚠ Error getting workspace_id from email: {e}')
+        return None
 
 
 def sync_calendar_events(calendar, last_updated_timestamp=None):
@@ -204,7 +252,15 @@ def sync_calendar_events(calendar, last_updated_timestamp=None):
                             bots = event_obj.bots
                             if not bots or len(bots) == 0:
                                 try:
-                                    result = create_bot_for_event(event_obj)
+                                    # Use calendar's default workspace_id and folder_id if set
+                                    workspace_id = calendar.default_workspace_id
+                                    folder_id = calendar.default_folder_id
+                                    
+                                    # Fallback: Get workspace_id from calendar email domain if not set on calendar
+                                    if not workspace_id and calendar.email and event_obj.backend_user_id:
+                                        workspace_id = _get_workspace_id_from_email(calendar.email, str(event_obj.backend_user_id))
+                                    
+                                    result = create_bot_for_event(event_obj, workspace_id=str(workspace_id) if workspace_id else None, folder_id=str(folder_id) if folder_id else None)
                                     if result['success']:
                                         print(f'INFO: ✓ Created bot {result["bot_id"]} for event {event_obj.id} (will join at {result["join_at"]})')
                                     else:

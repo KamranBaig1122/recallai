@@ -280,12 +280,20 @@ def bot_webhook(request, bot_id=None):
                                 except Calendar.DoesNotExist:
                                     pass
                             
+                            # Get BotRecording to copy workspace_id and folder_id
+                            from app.models import BotRecording
+                            bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                            workspace_id = bot_recording.workspace_id if bot_recording else None
+                            folder_id = bot_recording.folder_id if bot_recording else None
+                            
                             # Get or create transcription record (one per bot per event)
                             transcription, created = MeetingTranscription.objects.get_or_create(
                                 calendar_event_id=calendar_event.id,
                                 bot_id=bot_id,
                                 defaults={
                                     'backend_user_id': backend_user_id,  # Set backend_user_id
+                                    'workspace_id': workspace_id,  # Copy from BotRecording
+                                    'folder_id': folder_id,  # Copy from BotRecording (None = unresolved)
                                     'assemblyai_transcript_id': None,  # Will be set when final transcript is fetched
                                     'transcript_data': {
                                         'utterances': [{
@@ -302,10 +310,19 @@ def bot_webhook(request, bot_id=None):
                                 }
                             )
                             
-                            # Update backend_user_id if it wasn't set (for existing records)
+                            # Update backend_user_id, workspace_id, folder_id if they weren't set (for existing records)
+                            updated = False
                             if not transcription.backend_user_id and backend_user_id:
                                 transcription.backend_user_id = backend_user_id
-                                transcription.save(update_fields=['backend_user_id'])
+                                updated = True
+                            if not transcription.workspace_id and workspace_id:
+                                transcription.workspace_id = workspace_id
+                                updated = True
+                            if transcription.folder_id is None and folder_id is not None:
+                                transcription.folder_id = folder_id
+                                updated = True
+                            if updated:
+                                transcription.save(update_fields=['backend_user_id', 'workspace_id', 'folder_id'])
                             
                             if created:
                                 print(f'[bot-wh] [TRANSCRIPT] ✓ Created new transcription record in database (ID: {transcription.id})')
@@ -352,7 +369,7 @@ def bot_webhook(request, bot_id=None):
                                             import time
                                             # Wait 30 seconds after last transcript to see if meeting has ended
                                             time.sleep(30)
-                                            
+                                             
                                             try:
                                                 from app.models import MeetingTranscription, CalendarEvent, BotRecording
                                                 from app.services.groq.summary_generator import generate_summary_and_action_items_with_groq
@@ -508,20 +525,36 @@ def bot_webhook(request, bot_id=None):
                         ).first()
                     
                     if calendar_event:
+                        # Get BotRecording to copy workspace_id and folder_id
+                        workspace_id = bot_recording.workspace_id if bot_recording else None
+                        folder_id = bot_recording.folder_id if bot_recording else None
+                        
                         # Get or create transcription
                         transcription, created = MeetingTranscription.objects.get_or_create(
                             calendar_event_id=calendar_event.id,
                             bot_id=bot_id,
                             defaults={
                                 'backend_user_id': calendar_event.backend_user_id,
+                                'workspace_id': workspace_id,  # Copy from BotRecording
+                                'folder_id': folder_id,  # Copy from BotRecording (None = unresolved)
                                 'transcript_data': {'participants': []},
                                 'status': 'processing',
                             }
                         )
                         
-                        # Update backend_user_id if not set
+                        # Update backend_user_id, workspace_id, folder_id if not set
+                        updated = False
                         if not transcription.backend_user_id and calendar_event.backend_user_id:
                             transcription.backend_user_id = calendar_event.backend_user_id
+                            updated = True
+                        if not transcription.workspace_id and workspace_id:
+                            transcription.workspace_id = workspace_id
+                            updated = True
+                        if transcription.folder_id is None and folder_id is not None:
+                            transcription.folder_id = folder_id
+                            updated = True
+                        if updated:
+                            transcription.save(update_fields=['backend_user_id', 'workspace_id', 'folder_id'])
                         
                         # Get or initialize participants list in transcript_data
                         if 'participants' not in transcription.transcript_data:
@@ -821,10 +854,17 @@ def bot_webhook(request, bot_id=None):
                                                             except Calendar.DoesNotExist:
                                                                 pass
                                                         
+                                                        # Get BotRecording to copy workspace_id and folder_id
+                                                        bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                                                        workspace_id = bot_recording.workspace_id if bot_recording else None
+                                                        folder_id = bot_recording.folder_id if bot_recording else None
+                                                        
                                                         MeetingTranscription.objects.create(
                                                             calendar_event_id=calendar_event.id,
                                                             bot_id=bot_id,
                                                             backend_user_id=backend_user_id,  # Set backend_user_id
+                                                            workspace_id=workspace_id,  # Copy from BotRecording
+                                                            folder_id=folder_id,  # Copy from BotRecording (None = unresolved)
                                                             transcript_text=transcript_text,
                                                             transcript_data={
                                                                 **transcript_data,
@@ -1134,10 +1174,19 @@ def bot_webhook(request, bot_id=None):
                                                 # Extract action items
                                                 action_items = assemblyai_transcript.get('action_items', [])
                                                 
+                                                # Get BotRecording to copy workspace_id and folder_id
+                                                from app.models import BotRecording
+                                                bot_recording = BotRecording.objects.filter(bot_id=bot_id).first()
+                                                workspace_id = bot_recording.workspace_id if bot_recording else None
+                                                folder_id = bot_recording.folder_id if bot_recording else None
+                                                
                                                 transcription, created = MeetingTranscription.objects.get_or_create(
                                                     calendar_event_id=calendar_event.id,
                                                     bot_id=bot_id,
                                                     defaults={
+                                                        'backend_user_id': backend_user_id,
+                                                        'workspace_id': workspace_id,  # Copy from BotRecording
+                                                        'folder_id': folder_id,  # Copy from BotRecording (None = unresolved)
                                                         'assemblyai_transcript_id': transcript_id,
                                                         'transcript_data': assemblyai_transcript,
                                                         'transcript_text': assemblyai_transcript.get('text', ''),
@@ -1169,6 +1218,13 @@ def bot_webhook(request, bot_id=None):
                                                     transcription.summary = assemblyai_transcript.get('summary', '') or transcription.summary
                                                     transcription.action_items = action_items or transcription.action_items
                                                     transcription.status = 'completed' if assemblyai_transcript.get('status') == 'completed' else 'processing'
+                                                    
+                                                    # Update workspace_id and folder_id if not set
+                                                    if not transcription.workspace_id and workspace_id:
+                                                        transcription.workspace_id = workspace_id
+                                                    if transcription.folder_id is None and folder_id is not None:
+                                                        transcription.folder_id = folder_id
+                                                    
                                                     transcription.save()
                                                     print(f'[bot-wh] ✓ Updated transcript (preserved {len(existing_utterances)} utterances)')
                                                 print(f'[bot-wh] ✓ Processed unknown event as bot.done and saved transcript')

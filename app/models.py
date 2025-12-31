@@ -40,6 +40,8 @@ class Calendar(models.Model):
     auto_record_external_events = models.BooleanField(default=False)
     auto_record_only_confirmed_events = models.BooleanField(default=False)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='connected')  # connected or disconnected
+    default_folder_id = models.UUIDField(null=True, blank=True, db_index=True)  # Default folder ID for all bots created from this calendar
+    default_workspace_id = models.UUIDField(null=True, blank=True, db_index=True)  # Default workspace ID for this calendar
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -144,6 +146,8 @@ class BotRecording(models.Model):
     bot_id = models.CharField(max_length=255, unique=True)  # Recall.ai bot ID
     calendar_event_id = models.UUIDField(null=True, blank=True)  # Link to calendar event
     backend_user_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend user ID
+    workspace_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend workspace ID (required for bot creation)
+    folder_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend folder ID (optional - if None, goes to unresolved)
     recall_data = JSONField(default=dict)  # Full bot data from Recall.ai
     status = models.CharField(max_length=50, default='pending')  # pending, processing, completed, failed
     
@@ -155,6 +159,8 @@ class BotRecording(models.Model):
         indexes = [
             models.Index(fields=['backend_user_id']),
             models.Index(fields=['calendar_event_id']),
+            models.Index(fields=['workspace_id']),
+            models.Index(fields=['folder_id']),
         ]
     
     @property
@@ -202,6 +208,8 @@ class MeetingTranscription(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     calendar_event_id = models.UUIDField()  # Link to calendar event
     backend_user_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend user ID
+    workspace_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend workspace ID (copied from BotRecording)
+    folder_id = models.UUIDField(null=True, blank=True, db_index=True)  # Invite-ellie-backend folder ID (copied from BotRecording, None = unresolved)
     bot_id = models.CharField(max_length=255)  # Recall.ai bot ID
     assemblyai_transcript_id = models.CharField(max_length=255, null=True, blank=True)  # AssemblyAI transcript ID (not unique for real-time)
     
@@ -232,6 +240,8 @@ class MeetingTranscription(models.Model):
             models.Index(fields=['calendar_event_id']),
             models.Index(fields=['bot_id']),
             models.Index(fields=['assemblyai_transcript_id']),
+            models.Index(fields=['workspace_id']),
+            models.Index(fields=['folder_id']),
         ]
     
     @property

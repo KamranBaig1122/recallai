@@ -16,9 +16,15 @@ def google_calendar_callback(request):
         state = json.loads(request.GET.get('state', '{}'))
         userId = state.get('userId')
         calendarId = state.get('calendarId')
+        folder_id = state.get('folderId')  # Get folder_id from OAuth state
+        workspace_id = state.get('workspaceId')  # Get workspace_id from OAuth state
         code = request.GET.get('code')
         
         print(f'Received google oauth callback for user {userId} with code {code}')
+        if folder_id:
+            print(f'[OAuth] Folder preference from state: {folder_id}')
+        if workspace_id:
+            print(f'[OAuth] Workspace preference from state: {workspace_id}')
         
         oauth_tokens = fetch_tokens_from_authorization_code_for_google_calendar(code)
         
@@ -71,7 +77,13 @@ def google_calendar_callback(request):
                 user_id=userId,  # Keep for backward compatibility
                 backend_user_id=userId,  # Set backend_user_id (userId from state is backend user ID)
                 status='connected',  # Set status to connected
+                default_folder_id=folder_id if folder_id else None,  # Set folder preference from OAuth state
+                default_workspace_id=workspace_id if workspace_id else None,  # Set workspace preference from OAuth state
             )
+            if folder_id:
+                print(f'[OAuth] Created calendar with default_folder_id={folder_id}')
+            if workspace_id:
+                print(f'[OAuth] Created calendar with default_workspace_id={workspace_id}')
         
         email = local_calendar.email or ''
         # Redirect to React app integrations page if FRONTEND_URL is set
@@ -101,9 +113,15 @@ def microsoft_outlook_callback(request):
         state = json.loads(request.GET.get('state', '{}'))
         userId = state.get('userId')
         calendarId = state.get('calendarId')
+        folder_id = state.get('folderId')  # Get folder_id from OAuth state
+        workspace_id = state.get('workspaceId')  # Get workspace_id from OAuth state
         code = request.GET.get('code')
         
         print(f'Received microsoft oauth callback for user {userId} with code {code}')
+        if folder_id:
+            print(f'[OAuth] Folder preference from state: {folder_id}')
+        if workspace_id:
+            print(f'[OAuth] Workspace preference from state: {workspace_id}')
         
         oauth_tokens = fetch_tokens_from_authorization_code_for_microsoft_outlook(code)
         
@@ -138,6 +156,13 @@ def microsoft_outlook_callback(request):
             local_calendar.recall_data = recall_calendar
             local_calendar.backend_user_id = userId  # Update backend_user_id
             local_calendar.status = 'connected'  # Ensure status is connected
+            # Set folder and workspace preferences if provided in OAuth state
+            if folder_id:
+                local_calendar.default_folder_id = folder_id
+                print(f'[OAuth] Set default_folder_id={folder_id} on calendar {local_calendar.id}')
+            if workspace_id:
+                local_calendar.default_workspace_id = workspace_id
+                print(f'[OAuth] Set default_workspace_id={workspace_id} on calendar {local_calendar.id}')
             local_calendar.save()
         else:
             # Create new calendar
@@ -156,7 +181,13 @@ def microsoft_outlook_callback(request):
                 user_id=userId,  # Keep for backward compatibility
                 backend_user_id=userId,  # Set backend_user_id (userId from state is backend user ID)
                 status='connected',  # Set status to connected
+                default_folder_id=folder_id if folder_id else None,  # Set folder preference from OAuth state
+                default_workspace_id=workspace_id if workspace_id else None,  # Set workspace preference from OAuth state
             )
+            if folder_id:
+                print(f'[OAuth] Created calendar with default_folder_id={folder_id}')
+            if workspace_id:
+                print(f'[OAuth] Created calendar with default_workspace_id={workspace_id}')
         
         email = local_calendar.email or ''
         # Redirect to React app integrations page if FRONTEND_URL is set

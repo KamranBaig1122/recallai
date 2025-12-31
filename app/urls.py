@@ -38,6 +38,9 @@ urlpatterns = [
     path('api/user/recordings', user_api.api_user_recordings, name='api-user-recordings'),
     path('api/user/<uuid:user_id>/delete-all-data', calendar_api.api_delete_user_data, name='api-delete-user-data'),
     
+    # Assign folder to transcription (resolve unresolved meeting)
+    path('api/transcriptions/<uuid:transcription_id>/assign-folder', user_api.api_assign_folder_to_transcription, name='api-assign-folder-to-transcription'),
+    
     # Chat API endpoint
     path('api/chat', chat_api.api_chat, name='api-chat'),
     
