@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Previous Meeting Summary</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: #ffffff;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #e3e7f2;
+        }
+        .logo {
+            max-width: 150px;
+            margin-bottom: 15px;
+        }
+        h1 {
+            color: #1f2f46;
+            font-size: 24px;
+            margin: 0;
+        }
+        h2 {
+            color: #1f2f46;
+            font-size: 20px;
+            margin-top: 25px;
+            margin-bottom: 15px;
+            border-bottom: 1px solid #e3e7f2;
+            padding-bottom: 8px;
+        }
+        .meeting-info {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+        .meeting-info p {
+            margin: 5px 0;
+        }
+        .meeting-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #1f2f46;
+            margin-bottom: 10px;
+        }
+        .participants-list {
+            list-style: none;
+            padding: 0;
+            margin: 10px 0;
+        }
+        .participants-list li {
+            padding: 5px 0;
+            border-bottom: 1px solid #e3e7f2;
+        }
+        .participants-list li:last-child {
+            border-bottom: none;
+        }
+        .summary-text {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            line-height: 1.8;
+        }
+        .action-items {
+            list-style: none;
+            padding: 0;
+            margin: 15px 0;
+        }
+        .action-items li {
+            padding: 10px;
+            margin: 8px 0;
+            background-color: #fff3cd;
+            border-left: 4px solid #ffc107;
+            border-radius: 4px;
+        }
+        .nudges {
+            list-style: none;
+            padding: 0;
+            margin: 15px 0;
+        }
+        .nudges li {
+            padding: 10px;
+            margin: 8px 0;
+            background-color: #d1ecf1;
+            border-left: 4px solid #17a2b8;
+            border-radius: 4px;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 24px;
+            background-color: #4a90e2;
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 6px;
+            margin: 20px 0;
+            font-weight: bold;
+        }
+        .button:hover {
+            background-color: #357abd;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e3e7f2;
+            text-align: center;
+            color: #666;
+            font-size: 12px;
+        }
+        .no-data {
+            color: #999;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Previous Meeting Summary</h1>
+            {% if new_meeting_title %}
+            <p>Before your next meeting: <strong>{{ new_meeting_title }}</strong></p>
+            {% endif %}
+        </div>
+        
+        <div class="meeting-info">
+            <div class="meeting-title">{{ previous_meeting_title }}</div>
+            <p><strong>Date:</strong> {{ previous_meeting_date }}</p>
+            <p><strong>Time:</strong> {{ previous_meeting_time }}</p>
+            
+            {% if has_participants %}
+            <p><strong>Participants:</strong></p>
+            <ul class="participants-list">
+                {% for participant in participants %}
+                <li>
+                    {{ participant.name }}
+                    {% if participant.email %}
+                    <span style="color: #666;">({{ participant.email }})</span>
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p><strong>Participants:</strong> <span class="no-data">Not available</span></p>
+            {% endif %}
+        </div>
+        
+        <h2>Summary</h2>
+        <div class="summary-text">
+            {{ summary|linebreaks }}
+        </div>
+        
+        {% if has_action_items %}
+        <h2>Action Items</h2>
+        <ul class="action-items">
+            {% for item in action_items %}
+            <li>
+                {% if item.text %}
+                    {{ item.text }}
+                {% elif item.description %}
+                    {{ item.description }}
+                {% else %}
+                    {{ item }}
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+        
+        {% if has_contextual_nudges %}
+        <h2>Contextual Nudges</h2>
+        <ul class="nudges">
+            {% for nudge in contextual_nudges %}
+            <li>
+                {% if nudge.message %}
+                    {{ nudge.message }}
+                {% elif nudge.text %}
+                    {{ nudge.text }}
+                {% elif nudge.suggestion %}
+                    {{ nudge.suggestion }}
+                {% else %}
+                    {{ nudge }}
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+        
+        <div class="footer">
+            <p>This is an automated summary of your previous meeting.</p>
+            <p>&copy; {{ "now"|date:"Y" }} Invite Ellie. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+

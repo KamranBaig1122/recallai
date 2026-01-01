@@ -15,7 +15,7 @@ from app.views.calendar_api import add_cors_headers, get_backend_user_id_from_re
 
 def extract_participants_from_transcription(transcription: MeetingTranscription):
     """
-    Extract unique participant names from a transcription (exact name matching only)
+    Extract unique participant names from a transcription (case-insensitive matching)
     Excludes bot names as they're not real participants for matching purposes
     
     Uses two sources (in priority order):
@@ -26,7 +26,8 @@ def extract_participants_from_transcription(transcription: MeetingTranscription)
         transcription: MeetingTranscription instance
         
     Returns:
-        Set of participant names (normalized - whitespace trimmed, exact match)
+        Set of participant names (normalized - whitespace trimmed, case-insensitive for matching)
+        Note: Returns original case for display, but matching uses lowercase
     """
     participants = set()
     
@@ -42,7 +43,7 @@ def extract_participants_from_transcription(transcription: MeetingTranscription)
                 name = participant.get('name')
                 
                 if name and isinstance(name, str):
-                    # Exact name matching: trim whitespace only (case-sensitive, exact match)
+                    # Normalize: trim whitespace, preserve original case for display
                     normalized_name = name.strip()
                     # Exclude bots (not real participants for matching)
                     if normalized_name and normalized_name.lower() not in bot_names:
@@ -56,7 +57,7 @@ def extract_participants_from_transcription(transcription: MeetingTranscription)
                 speaker = utterance.get('speaker')
                 
                 if speaker and isinstance(speaker, str):
-                    # Exact name matching: trim whitespace only (case-sensitive, exact match)
+                    # Normalize: trim whitespace, preserve original case for display
                     normalized_name = speaker.strip()
                     # Exclude bots (not real participants for matching)
                     if normalized_name and normalized_name.lower() not in bot_names:
@@ -106,20 +107,44 @@ def get_live_meeting_participants(bot_id: str, backend_user_id: str):
         
         print(f'[ContextualNudgesAPI] Bot {bot_id}: status={bot_status}')
         
-        # SIMPLE CHECK: If status is 'completed', meeting is NOT live
-        if bot_status == 'completed':
-            print(f'[ContextualNudgesAPI] Bot status is completed, meeting is NOT live')
-            return [], None, {}
-        
         # Find transcription for this bot
         transcription = MeetingTranscription.objects.filter(
             bot_id=bot_id,
             backend_user_id=backend_user_id
         ).order_by('-updated_at').first()
         
-        # CRITICAL CHECK: If transcription exists and is completed, meeting is NOT live
-        if transcription and transcription.status == 'completed':
-            print(f'[ContextualNudgesAPI] Transcription status is completed for bot {bot_id}, meeting is NOT live (overriding bot status)')
+        # Check if transcription was recently updated (within last 3 minutes)
+        # This handles cases where bot.done was received but meeting is still "live" for nudges
+        is_recently_updated = False
+        if transcription and transcription.updated_at:
+            three_minutes_ago = timezone.now() - timedelta(minutes=3)
+            is_recently_updated = transcription.updated_at >= three_minutes_ago
+            if is_recently_updated:
+                print(f'[ContextualNudgesAPI] Transcription for bot {bot_id} was updated recently ({transcription.updated_at}), considering as potentially live')
+        
+        # If bot status is 'completed' but transcription was updated very recently (within 3 min),
+        # still consider it live if transcription has participants and status is not 'completed'
+        if bot_status == 'completed':
+            if is_recently_updated and transcription:
+                # Check if transcription has participants and is not marked as completed
+                if transcription.status != 'completed':
+                    participants = extract_participants_from_transcription(transcription)
+                    if participants:
+                        print(f'[ContextualNudgesAPI] Bot status is completed but transcription was updated recently with participants - treating as live')
+                        # Continue to return transcription (will be handled below)
+                    else:
+                        print(f'[ContextualNudgesAPI] Bot status is completed and no participants found - meeting is NOT live')
+                        return [], None, {}
+                else:
+                    print(f'[ContextualNudgesAPI] Bot status is completed and transcription status is completed - meeting is NOT live')
+                    return [], None, {}
+            else:
+                print(f'[ContextualNudgesAPI] Bot status is completed and transcription not recently updated - meeting is NOT live')
+                return [], None, {}
+        
+        # CRITICAL CHECK: If transcription exists and is completed AND not recently updated, meeting is NOT live
+        if transcription and transcription.status == 'completed' and not is_recently_updated:
+            print(f'[ContextualNudgesAPI] Transcription status is completed for bot {bot_id} and not recently updated, meeting is NOT live')
             return [], None, {}
         
         # STRICT CHECK: Only consider meeting live if bot_status is 'joining' or 'processing' AND transcription exists AND was recently updated
@@ -168,20 +193,47 @@ def get_live_meeting_participants(bot_id: str, backend_user_id: str):
             
             print(f'[ContextualNudgesAPI] Checking bot {bot_recording.bot_id}: status={bot_status}')
             
-            # SIMPLE CHECK: If status is 'completed', skip this bot
-            if bot_status == 'completed':
-                print(f'[ContextualNudgesAPI] Bot {bot_recording.bot_id} status is completed, skipping')
-                continue
-            
             # Find transcription for this bot
             current_transcription = MeetingTranscription.objects.filter(
                 bot_id=bot_recording.bot_id,
                 backend_user_id=backend_user_id
             ).order_by('-updated_at').first()
             
-            # CRITICAL CHECK: If transcription exists and is completed, skip this bot
-            if current_transcription and current_transcription.status == 'completed':
-                print(f'[ContextualNudgesAPI] Transcription status is completed for bot {bot_recording.bot_id}, skipping (overriding bot status)')
+            # Check if transcription was recently updated (within last 3 minutes)
+            # This handles cases where bot.done was received but meeting is still "live" for nudges
+            is_recently_updated = False
+            if current_transcription and current_transcription.updated_at:
+                three_minutes_ago = timezone.now() - timedelta(minutes=3)
+                is_recently_updated = current_transcription.updated_at >= three_minutes_ago
+                if is_recently_updated:
+                    print(f'[ContextualNudgesAPI] Transcription for bot {bot_recording.bot_id} was updated recently ({current_transcription.updated_at}), considering as potentially live')
+            
+            # If bot status is 'completed' but transcription was updated very recently (within 3 min),
+            # still consider it live if transcription has participants and status is not 'completed'
+            if bot_status == 'completed':
+                if is_recently_updated and current_transcription:
+                    # Check if transcription has participants and is not marked as completed
+                    if current_transcription.status != 'completed':
+                        participants_check = extract_participants_from_transcription(current_transcription)
+                        if participants_check:
+                            print(f'[ContextualNudgesAPI] Bot {bot_recording.bot_id} status is completed but transcription was updated recently with participants - treating as live')
+                            # Set transcription and break - this is a live meeting
+                            transcription = current_transcription
+                            print(f'[ContextualNudgesAPI] Found live meeting (bot_id: {bot_recording.bot_id}, bot_status: {bot_status}, recently updated)')
+                            break
+                        else:
+                            print(f'[ContextualNudgesAPI] Bot {bot_recording.bot_id} status is completed and no participants found - skipping')
+                            continue
+                    else:
+                        print(f'[ContextualNudgesAPI] Bot {bot_recording.bot_id} status is completed and transcription status is completed - skipping')
+                        continue
+                else:
+                    print(f'[ContextualNudgesAPI] Bot {bot_recording.bot_id} status is completed and transcription not recently updated - skipping')
+                    continue
+            
+            # CRITICAL CHECK: If transcription exists and is completed AND not recently updated, skip this bot
+            if current_transcription and current_transcription.status == 'completed' and not is_recently_updated:
+                print(f'[ContextualNudgesAPI] Transcription status is completed for bot {bot_recording.bot_id} and not recently updated, skipping')
                 continue
             
             # STRICT CHECK: Only consider meeting live if bot_status is 'joining' or 'processing' AND transcription exists AND was recently updated
@@ -243,10 +295,11 @@ def find_previous_meetings_with_participants(
     """
     Find previous completed meetings where ALL current participants were present.
     
-    SIMPLE MATCHING STRATEGY:
+    DYNAMIC MATCHING STRATEGY:
     1. If only 1 participant → return empty (no nudges for solo meetings)
     2. If 2+ participants → find meetings where ALL of them were present
-    3. Uses exact name matching (case-sensitive)
+    3. Uses case-insensitive name matching for better matching
+    4. When a new participant joins, automatically updates to show meetings with ALL participants
     
     Args:
         backend_user_id: User ID
@@ -261,16 +314,21 @@ def find_previous_meetings_with_participants(
         print(f'[ContextualNudgesAPI] No current participants provided - returning empty')
         return []
     
-    # Normalize current participants (exact name match - trim whitespace only)
-    current_participants_set = {p.strip() for p in current_participants if p.strip()}
+    # Normalize current participants (trim whitespace, case-insensitive matching)
+    # Store both original case (for display) and lowercase (for matching)
+    current_participants_normalized = {p.strip().lower(): p.strip() for p in current_participants if p.strip()}
+    current_participants_lower = set(current_participants_normalized.keys())
     
     # If only 1 participant → return empty (no nudges for solo meetings)
-    if len(current_participants_set) <= 1:
-        print(f'[ContextualNudgesAPI] Only {len(current_participants_set)} participant(s) - returning empty (no nudges for solo meetings)')
+    if len(current_participants_lower) <= 1:
+        print(f'[ContextualNudgesAPI] Only {len(current_participants_lower)} participant(s) - returning empty (no nudges for solo meetings)')
         return []
     
-    print(f'[ContextualNudgesAPI] Current meeting has {len(current_participants_set)} participants: {sorted(current_participants_set)}')
+    print(f'[ContextualNudgesAPI] ==========================================')
+    print(f'[ContextualNudgesAPI] 🔍 SEARCHING FOR MATCHING MEETINGS')
+    print(f'[ContextualNudgesAPI] Current meeting has {len(current_participants_lower)} participants: {sorted([current_participants_normalized[p] for p in current_participants_lower])}')
     print(f'[ContextualNudgesAPI] Will show meetings where ALL of these participants were present')
+    print(f'[ContextualNudgesAPI] ==========================================')
     
     # Get all completed transcriptions for this user that have contextual nudges
     transcriptions = MeetingTranscription.objects.filter(
@@ -281,21 +339,34 @@ def find_previous_meetings_with_participants(
         contextual_nudges=[]  # Exclude empty arrays
     ).order_by('-created_at')  # Most recent first
     
+    print(f'[ContextualNudgesAPI] Checking {len(transcriptions)} completed meetings with contextual nudges')
+    
     matching_transcriptions = []
     
     for transcription in transcriptions:
         # Extract participants from this meeting
         meeting_participants = extract_participants_from_transcription(transcription)
         
-        # Check if ALL current participants are present in this meeting
-        if current_participants_set.issubset(meeting_participants):
+        # Normalize meeting participants to lowercase for case-insensitive matching
+        meeting_participants_lower = {p.lower() for p in meeting_participants}
+        
+        # Check if ALL current participants (case-insensitive) are present in this meeting
+        if current_participants_lower.issubset(meeting_participants_lower):
             matching_transcriptions.append(transcription)
-            print(f'[ContextualNudgesAPI] Found matching meeting: {transcription.id}')
+            print(f'[ContextualNudgesAPI] ✅ MATCH FOUND: Meeting {transcription.id}')
             print(f'[ContextualNudgesAPI]   Meeting participants: {sorted(list(meeting_participants))}')
-            print(f'[ContextualNudgesAPI]   Current participants: {sorted(list(current_participants_set))}')
+            print(f'[ContextualNudgesAPI]   Current participants: {sorted([current_participants_normalized[p] for p in current_participants_lower])}')
             print(f'[ContextualNudgesAPI]   All current participants were present in this meeting')
+        else:
+            # Debug: Show why it didn't match (only for first few non-matches to avoid spam)
+            if len(matching_transcriptions) == 0 and len([t for t in transcriptions[:3] if t.id == transcription.id]) > 0:
+                missing = current_participants_lower - meeting_participants_lower
+                if missing:
+                    print(f'[ContextualNudgesAPI] ❌ No match: Meeting {transcription.id} missing participants: {sorted([current_participants_normalized[p] for p in missing])}')
     
+    print(f'[ContextualNudgesAPI] ==========================================')
     print(f'[ContextualNudgesAPI] Found {len(matching_transcriptions)} meetings where all participants were present')
+    print(f'[ContextualNudgesAPI] ==========================================')
     
     return matching_transcriptions
 

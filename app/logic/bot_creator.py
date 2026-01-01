@@ -224,6 +224,29 @@ def create_bot_for_event(event: CalendarEvent, force: bool = False, workspace_id
             except Exception as e:
                 print(f'WARNING: Could not create BotRecording placeholder: {e}')
             
+            # Send previous meeting summary email (background task, don't block)
+            try:
+                if event.backend_user_id:
+                    from app.services.email_service import send_previous_meeting_summary_email
+                    # Call in background (fire and forget)
+                    import threading
+                    def send_email_async():
+                        try:
+                            send_previous_meeting_summary_email(
+                                backend_user_id=str(event.backend_user_id),
+                                current_event_start_time=start_time,
+                                new_meeting_title=event.title
+                            )
+                        except Exception as e:
+                            print(f'[BotCreator] Error sending previous meeting email (non-blocking): {e}')
+                    
+                    # Start email in background thread
+                    email_thread = threading.Thread(target=send_email_async, daemon=True)
+                    email_thread.start()
+                    print(f'[BotCreator] Started background thread to send previous meeting summary email')
+            except Exception as e:
+                print(f'[BotCreator] Could not send previous meeting email (non-blocking): {e}')
+            
             return {
                 'success': True,
                 'bot_id': bot_id,

@@ -1,5 +1,5 @@
 from django.urls import path
-from app.views import root, auth, oauth, calendar, calendar_event, webhooks, calendar_api, transcription_api, user_api, chat_api
+from app.views import root, auth, oauth, calendar, calendar_event, webhooks, calendar_api, transcription_api, user_api, chat_api, notification_api
 import app.views.bot_webhooks as bot_webhooks
 from app.views import static_files, bot_recordings, recordings_list, contextual_nudges_api
 
@@ -40,6 +40,15 @@ urlpatterns = [
     
     # Assign folder to transcription (resolve unresolved meeting)
     path('api/transcriptions/<uuid:transcription_id>/assign-folder', user_api.api_assign_folder_to_transcription, name='api-assign-folder-to-transcription'),
+    
+    # Token verification for email assignment links
+    path('api/assign-folder/verify-token', user_api.api_verify_assignment_token, name='api-verify-assignment-token'),
+    
+    # Notifications API endpoints
+    path('api/notifications', notification_api.api_get_notifications, name='api-get-notifications'),
+    path('api/notifications/<uuid:notification_id>/read', notification_api.api_mark_notification_read, name='api-mark-notification-read'),
+    path('api/notifications/read-all', notification_api.api_mark_all_notifications_read, name='api-mark-all-notifications-read'),
+    path('api/notifications/<uuid:notification_id>', notification_api.api_delete_notification, name='api-delete-notification'),
     
     # Chat API endpoint
     path('api/chat', chat_api.api_chat, name='api-chat'),

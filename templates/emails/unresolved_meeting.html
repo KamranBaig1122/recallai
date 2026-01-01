@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Action Required: Assign Folder to Meeting</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: #ffffff;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .logo {
+            font-size: 24px;
+            font-weight: bold;
+            color: #4F46E5;
+            margin-bottom: 10px;
+        }
+        h1 {
+            color: #1F2937;
+            font-size: 24px;
+            margin: 0 0 10px 0;
+        }
+        .meeting-info {
+            background-color: #F9FAFB;
+            border-left: 4px solid #4F46E5;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .meeting-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #1F2937;
+            margin-bottom: 8px;
+        }
+        .meeting-details {
+            color: #6B7280;
+            font-size: 14px;
+        }
+        .action-section {
+            margin: 30px 0;
+        }
+        .primary-button {
+            display: inline-block;
+            background-color: #4F46E5;
+            color: #ffffff;
+            padding: 12px 24px;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: 600;
+            text-align: center;
+            margin: 10px 0;
+        }
+        .primary-button:hover {
+            background-color: #4338CA;
+        }
+        .folders-section {
+            margin: 30px 0;
+        }
+        .folders-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1F2937;
+            margin-bottom: 15px;
+        }
+        .folder-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .folder-item {
+            background-color: #F9FAFB;
+            border: 1px solid #E5E7EB;
+            border-radius: 6px;
+            padding: 12px 15px;
+            margin-bottom: 10px;
+        }
+        .folder-name {
+            font-weight: 600;
+            color: #1F2937;
+            margin-bottom: 4px;
+        }
+        .folder-workspace {
+            font-size: 12px;
+            color: #6B7280;
+            margin-bottom: 8px;
+        }
+        .folder-link {
+            display: inline-block;
+            color: #4F46E5;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .folder-link:hover {
+            text-decoration: underline;
+        }
+        .no-folders {
+            color: #6B7280;
+            font-style: italic;
+            padding: 15px;
+            background-color: #F9FAFB;
+            border-radius: 6px;
+        }
+        .footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #E5E7EB;
+            text-align: center;
+            color: #6B7280;
+            font-size: 12px;
+        }
+        .note {
+            background-color: #FEF3C7;
+            border-left: 4px solid #F59E0B;
+            padding: 12px;
+            margin: 20px 0;
+            border-radius: 4px;
+            font-size: 14px;
+            color: #92400E;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">Invite Ellie</div>
+            <h1>Action Required: Assign Folder</h1>
+        </div>
+
+        <p>Hello,</p>
+        
+        <p>You have a meeting that needs to be assigned to a folder. Please assign it to keep your meeting data organized.</p>
+
+        <div class="meeting-info">
+            <div class="meeting-title">{{ meeting_title }}</div>
+            <div class="meeting-details">
+                📅 {{ meeting_date }} at {{ meeting_time }}
+            </div>
+        </div>
+
+        <div class="action-section">
+            <a href="{{ assignment_url }}" class="primary-button" style="display: block; text-align: center;">
+                Assign Folder to This Meeting
+            </a>
+        </div>
+
+        {% if has_folders %}
+        <div class="folders-section">
+            <div class="folders-title">📁 Available Folders in {{ workspace_name }}:</div>
+            <p style="color: #6B7280; font-size: 14px; margin-bottom: 15px;">
+                Click on a folder below to assign this meeting directly:
+            </p>
+            <ul class="folder-list">
+                {% for folder in folders %}
+                <li class="folder-item">
+                    <div class="folder-name">{{ folder.name }}</div>
+                    <div class="folder-workspace">Workspace: {{ folder.workspace_name }}</div>
+                    <a href="{{ folder.url }}" class="folder-link">Assign to this folder →</a>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% else %}
+        <div class="folders-section">
+            <div class="no-folders">
+                No folders available. Click the button above to create a new folder or assign to an existing one.
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="note">
+            <strong>Note:</strong> This link will expire in 7 days. Please assign the folder as soon as possible to keep your meeting data organized.
+        </div>
+
+        <div class="footer">
+            <p>This is an automated notification from Invite Ellie.</p>
+            <p>If you have any questions, please contact support.</p>
+        </div>
+    </div>
+</body>
+</html>
+

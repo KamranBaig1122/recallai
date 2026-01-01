@@ -417,7 +417,11 @@ def bot_webhook(request, bot_id=None):
                                                                 summary = groq_result.get("summary", "")
                                                                 action_items = groq_result.get("action_items", [])
                                                                 
+                                                                # Initialize transcript_data before using it
+                                                                transcript_data = transcription_check.transcript_data.copy() if transcription_check.transcript_data else {}
+                                                                
                                                                 # Generate contextual nudges and impact score
+                                                                nudge_result = None
                                                                 try:
                                                                     from app.services.groq.nudge_analyzer import generate_contextual_nudges_and_impact_score_with_groq
                                                                     from app.models import MeetingTranscription
@@ -459,8 +463,6 @@ def bot_webhook(request, bot_id=None):
                                                                         print(f'[bot-wh] [DELAYED CHECK] ✓ Generated {len(contextual_nudges)} nudges and impact score: {impact_score}')
                                                                 except Exception as nudge_error:
                                                                     print(f'[bot-wh] [DELAYED CHECK] ⚠ WARNING: Error generating nudges: {nudge_error}')
-                                                                
-                                                                transcript_data = transcription_check.transcript_data.copy() if transcription_check.transcript_data else {}
                                                                 transcript_data['summary'] = summary
                                                                 transcript_data['action_items'] = action_items
                                                                 
@@ -776,7 +778,11 @@ def bot_webhook(request, bot_id=None):
                                                     summary = groq_result.get("summary", "")
                                                     action_items = groq_result.get("action_items", [])
                                                     
+                                                    # Preserve existing transcript data structure (initialize before using)
+                                                    transcript_data = existing_transcription.transcript_data.copy() if existing_transcription.transcript_data else {}
+                                                    
                                                     # Generate contextual nudges and impact score
+                                                    nudge_result = None
                                                     try:
                                                         from app.services.groq.nudge_analyzer import generate_contextual_nudges_and_impact_score_with_groq
                                                         from app.models import MeetingTranscription
@@ -819,9 +825,6 @@ def bot_webhook(request, bot_id=None):
                                                                 print(f'[bot-wh] [FALLBACK] ✓ Generated {len(contextual_nudges)} nudges and impact score: {impact_score}')
                                                     except Exception as nudge_error:
                                                         print(f'[bot-wh] [FALLBACK] ⚠ WARNING: Error generating nudges: {nudge_error}')
-                                                    
-                                                    # Preserve existing transcript data structure
-                                                    transcript_data = existing_transcription.transcript_data.copy() if existing_transcription.transcript_data else {}
                                                     
                                                     # Update or create transcription record
                                                     if existing_transcription:

@@ -263,6 +263,7 @@ def sync_calendar_events(calendar, last_updated_timestamp=None):
                                     result = create_bot_for_event(event_obj, workspace_id=str(workspace_id) if workspace_id else None, folder_id=str(folder_id) if folder_id else None)
                                     if result['success']:
                                         print(f'INFO: ✓ Created bot {result["bot_id"]} for event {event_obj.id} (will join at {result["join_at"]})')
+                                        # Previous meeting email is sent automatically by create_bot_for_event
                                     else:
                                         print(f'WARNING: Failed to create bot for event {event_obj.id}: {result.get("error")}')
                                 except Exception as bot_error:

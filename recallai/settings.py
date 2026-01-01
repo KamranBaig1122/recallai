@@ -199,6 +199,33 @@ MICROSOFT_OUTLOOK_OAUTH_CLIENT_ID = os.getenv('MICROSOFT_OUTLOOK_OAUTH_CLIENT_ID
 MICROSOFT_OUTLOOK_OAUTH_CLIENT_SECRET = os.getenv('MICROSOFT_OUTLOOK_OAUTH_CLIENT_SECRET')
 REQUEST_ONLY_CALENDAR_SCOPES = os.getenv('REQUEST_ONLY_CALENDAR_SCOPES', '').lower() == 'true'
 
+# Notification settings for unresolved meetings
+# Time threshold in minutes: how long after meeting ends before sending notification
+UNRESOLVED_MEETING_NOTIFICATION_THRESHOLD_MINUTES = int(os.getenv('UNRESOLVED_MEETING_NOTIFICATION_THRESHOLD_MINUTES', '10'))
+
+# Check interval in minutes: how often the backend checks for unresolved meetings
+UNRESOLVED_MEETING_CHECK_INTERVAL_MINUTES = int(os.getenv('UNRESOLVED_MEETING_CHECK_INTERVAL_MINUTES', '5'))
+
+# Email follow-up delay in minutes: additional delay before sending email (if different from threshold)
+# If set, email will be sent after: threshold + email_follow_up_delay
+UNRESOLVED_MEETING_EMAIL_FOLLOW_UP_DELAY_MINUTES = int(os.getenv('UNRESOLVED_MEETING_EMAIL_FOLLOW_UP_DELAY_MINUTES', '0'))
+
+# Enable/disable notification types
+ENABLE_IN_APP_NOTIFICATIONS = os.getenv('ENABLE_IN_APP_NOTIFICATIONS', 'true').lower() == 'true'
+ENABLE_EMAIL_NOTIFICATIONS = os.getenv('ENABLE_EMAIL_NOTIFICATIONS', 'true').lower() == 'true'
+
+# Email settings (SMTP2Go configuration)
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'mail-eu.smtp2go.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '2525'))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'inviteellie.ai')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', 'kI7elOdwSFycuNBn')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@inviteellie.ai')
+
+# Token expiry for email assignment links (in days)
+ASSIGNMENT_TOKEN_EXPIRY_DAYS = int(os.getenv('ASSIGNMENT_TOKEN_EXPIRY_DAYS', '7'))
+
 # Redis for background tasks (optional - can use Django Q or Celery)
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 

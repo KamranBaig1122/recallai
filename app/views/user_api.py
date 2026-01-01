@@ -6,9 +6,11 @@ import json
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
-from app.models import Calendar, CalendarEvent, MeetingTranscription, BotRecording
+from app.models import Calendar, CalendarEvent, MeetingTranscription, BotRecording, Notification
 from app.views.calendar_api import add_cors_headers, get_backend_user_id_from_request
-from datetime import datetime
+from django.core.signing import Signer, BadSignature
+from datetime import datetime, timedelta
+from django.conf import settings
 
 
 @require_http_methods(["GET", "OPTIONS"])
@@ -424,6 +426,155 @@ def api_assign_folder_to_transcription(request, transcription_id):
             'workspace_id': workspace_id,
         })
         return add_cors_headers(response, request)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        response = JsonResponse({'error': str(e)}, status=500)
+        return add_cors_headers(response, request)
+
+
+@require_http_methods(["GET", "OPTIONS"])
+@csrf_exempt
+def api_verify_assignment_token(request):
+    """
+    Verify token for email assignment link.
+    Token format: signed payload containing meeting_id:user_id:expiry
+    """
+    if request.method == 'OPTIONS':
+        response = JsonResponse({})
+        return add_cors_headers(response, request)
+    
+    try:
+        token = request.GET.get('token')
+        meeting_id = request.GET.get('meeting_id')
+        
+        if not token:
+            response = JsonResponse({'error': 'Token is required'}, status=400)
+            return add_cors_headers(response, request)
+        
+        if not meeting_id:
+            response = JsonResponse({'error': 'meeting_id is required'}, status=400)
+            return add_cors_headers(response, request)
+        
+        # URL decode the token (in case it was URL encoded)
+        from urllib.parse import unquote
+        try:
+            token = unquote(token)
+        except Exception:
+            pass  # Token might not be URL encoded
+        
+        # Debug: Check if token looks like it's already unsigned (raw payload)
+        # Django's Signer adds a signature, so signed tokens should have a hash at the end
+        # If the token looks like raw payload (3 colons), it might not be signed
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Count colons in token - signed tokens have 4+ colons (payload has 3, signature adds more)
+        colon_count = token.count(':')
+        logger.info(f'[TokenVerification] Token has {colon_count} colons, length: {len(token)}')
+        
+        # Verify and unsign the token
+        # Try with salt first (new tokens), then without salt (old tokens for backward compatibility)
+        payload = None
+        signer_with_salt = Signer(salt='assignment-token')
+        signer_without_salt = Signer()
+        
+        try:
+            # Try with salt first (new tokens)
+            payload = signer_with_salt.unsign(token)
+            logger.info(f'[TokenVerification] Successfully unsigned token with salt, payload length: {len(payload)}')
+        except BadSignature:
+            try:
+                # Try without salt (old tokens for backward compatibility)
+                payload = signer_without_salt.unsign(token)
+                logger.info(f'[TokenVerification] Successfully unsigned token without salt (backward compatibility), payload length: {len(payload)}')
+            except BadSignature as e:
+                # Log the error for debugging
+                logger.error(f'[TokenVerification] BadSignature error with both signers: {str(e)}, token preview: {token[:50]}...')
+                # Check if token might be the raw payload (not signed)
+                if colon_count == 3:
+                    logger.error('[TokenVerification] Token appears to be unsigned (raw payload). Expected signed token.')
+                    response = JsonResponse({'error': 'Token appears to be unsigned. Please use a valid assignment link from email.'}, status=400)
+                else:
+                    response = JsonResponse({'error': 'Invalid token signature'}, status=400)
+                return add_cors_headers(response, request)
+        except Exception as e:
+            logger.error(f'[TokenVerification] Unexpected error unsigning token: {str(e)}')
+            response = JsonResponse({'error': 'Token verification failed'}, status=400)
+            return add_cors_headers(response, request)
+        
+        if not payload:
+            logger.error('[TokenVerification] Failed to unsign token with both signers')
+            response = JsonResponse({'error': 'Token verification failed'}, status=400)
+            return add_cors_headers(response, request)
+        
+        # Parse payload: meeting_id:user_id:expiry
+        # The expiry datetime may contain colons (e.g., 2026-01-08T16:32:04.720567+00:00)
+        # We need to split on the FIRST two colons only, leaving the expiry intact
+        # Find the first two colons (separating meeting_id, user_id, and expiry)
+        first_colon_idx = payload.find(':')
+        if first_colon_idx == -1:
+            logger.error(f'[TokenVerification] No colon found in payload: {payload}')
+            response = JsonResponse({'error': 'Invalid token format: no separator found'}, status=400)
+            return add_cors_headers(response, request)
+        
+        second_colon_idx = payload.find(':', first_colon_idx + 1)
+        if second_colon_idx == -1:
+            logger.error(f'[TokenVerification] Only one colon found in payload: {payload}')
+            response = JsonResponse({'error': 'Invalid token format: missing separator'}, status=400)
+            return add_cors_headers(response, request)
+        
+        # Split on first two colons only
+        token_meeting_id = payload[:first_colon_idx]
+        token_user_id = payload[first_colon_idx + 1:second_colon_idx]
+        expiry_str = payload[second_colon_idx + 1:]  # Everything after second colon (includes all datetime colons)
+        
+        # Debug logging
+        logger.info(f'[TokenVerification] Full payload: {payload}')
+        logger.info(f'[TokenVerification] Parsed - meeting_id: "{token_meeting_id}" (len={len(token_meeting_id)}), user_id: "{token_user_id}", expiry: "{expiry_str}"')
+        logger.info(f'[TokenVerification] URL meeting_id: "{meeting_id}" (len={len(meeting_id)})')
+        
+        # Verify meeting_id matches (strip whitespace just in case)
+        token_meeting_id = token_meeting_id.strip()
+        meeting_id = meeting_id.strip()
+        
+        if token_meeting_id != meeting_id:
+            logger.error(f'[TokenVerification] Meeting ID mismatch! Token has: "{token_meeting_id}", URL has: "{meeting_id}"')
+            logger.error(f'[TokenVerification] Token meeting_id bytes: {token_meeting_id.encode()}, URL meeting_id bytes: {meeting_id.encode()}')
+            response = JsonResponse({'error': 'Token does not match meeting ID'}, status=400)
+            return add_cors_headers(response, request)
+        
+        # Check expiry manually (since Signer doesn't support max_age)
+        try:
+            from django.utils import timezone
+            expiry = datetime.fromisoformat(expiry_str)
+            if timezone.now() > expiry:
+                response = JsonResponse({'error': 'Token has expired'}, status=400)
+                return add_cors_headers(response, request)
+        except ValueError:
+            response = JsonResponse({'error': 'Invalid expiry format in token'}, status=400)
+            return add_cors_headers(response, request)
+        
+        # Get meeting title for response
+        try:
+            transcription = MeetingTranscription.objects.get(id=meeting_id)
+            try:
+                event = CalendarEvent.objects.get(id=transcription.calendar_event_id)
+                meeting_title = event.title or 'Untitled Meeting'
+            except CalendarEvent.DoesNotExist:
+                meeting_title = 'Untitled Meeting'
+        except MeetingTranscription.DoesNotExist:
+            response = JsonResponse({'error': 'Meeting not found'}, status=404)
+            return add_cors_headers(response, request)
+        
+        response = JsonResponse({
+            'valid': True,
+            'meeting_id': meeting_id,
+            'user_id': token_user_id,
+            'meeting_title': meeting_title,
+        })
+        return add_cors_headers(response, request)
+        
     except Exception as e:
         import traceback
         traceback.print_exc()

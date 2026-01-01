@@ -228,6 +228,11 @@ class MeetingTranscription(models.Model):
     language = models.CharField(max_length=10, null=True, blank=True)  # Language code (e.g., 'en')
     duration = models.FloatField(null=True, blank=True)  # Duration in seconds
     
+    # Notification tracking for unresolved meetings
+    notification_sent_at = models.DateTimeField(null=True, blank=True, db_index=True)  # When notification was sent
+    notification_type = models.CharField(max_length=20, null=True, blank=True)  # 'in_app', 'email', or 'both'
+    notification_retry_count = models.IntegerField(default=0)  # Number of retry attempts
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -260,3 +265,34 @@ class MeetingTranscription(models.Model):
         if self.action_items:
             return self.action_items
         return self.transcript_data.get('action_items', [])
+
+
+class Notification(models.Model):
+    """Stores in-app notifications for users"""
+    NOTIFICATION_TYPES = [
+        ('unresolved_meeting_notification', 'Unresolved Meeting Notification'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    backend_user_id = models.UUIDField(db_index=True)  # Invite-ellie-backend user ID
+    notification_type = models.CharField(max_length=50, choices=NOTIFICATION_TYPES)
+    meeting_id = models.UUIDField(null=True, blank=True, db_index=True)  # Associated meeting transcription ID
+    meeting_title = models.CharField(max_length=500)
+    message = models.TextField()
+    read = models.BooleanField(default=False, db_index=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'notifications'
+        indexes = [
+            models.Index(fields=['backend_user_id', 'read']),
+            models.Index(fields=['backend_user_id', '-created_at']),
+            models.Index(fields=['meeting_id']),
+        ]
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f'Notification {self.id} for user {self.backend_user_id} - {self.notification_type}'
