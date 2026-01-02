@@ -164,10 +164,10 @@ class Command(BaseCommand):
                 region = os.getenv('RECALL_REGION', 'us-west-2')
                 
                 # Create the bot with join_at
-                # Bot name is "Ellie" as requested
+                # Bot name is "Ellie - AI recording, memory and recall"
                 bot_data = recall_service.create_bot(
                     meeting_url=event.meeting_url,
-                    bot_name="Ellie",
+                    bot_name="Ellie - AI recording, memory and recall",
                     join_at=join_at,
                     platform=platform,
                     recording_config=recording_config,
@@ -337,10 +337,10 @@ class Command(BaseCommand):
             },
             "participant_events": {},
             "meeting_metadata": {
-                "bot_name": "Ellie",
+                "bot_name": "Ellie - AI recording, memory and recall",
                 "bot_avatar_url": logo_url
             } if logo_url else {
-                "bot_name": "Ellie"
+                "bot_name": "Ellie - AI recording, memory and recall"
             },
             "start_recording_on": "participant_join",
             "audio_mixed_raw": {},

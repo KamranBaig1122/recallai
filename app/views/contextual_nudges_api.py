@@ -18,16 +18,21 @@ def extract_participants_from_transcription(transcription: MeetingTranscription)
     Extract unique participant names from a transcription (case-insensitive matching)
     Excludes bot names as they're not real participants for matching purposes
     
-    Uses two sources (in priority order):
-    1. Stored participants from webhook events (real-time, most accurate)
-    2. Utterances from transcript (fallback if webhook data not available)
+    Uses multiple sources and COMBINES them to get ALL participants:
+    1. Stored participants from webhook events (PRIMARY SOURCE - includes ALL participants, even silent ones)
+    2. Utterances from transcript (SUPPLEMENT - only includes participants who spoke)
+    
+    CRITICAL: Stored participants (from participant_events.join webhooks) include ALL participants
+    who joined the meeting, regardless of whether they spoke. This is the authoritative source.
+    Utterances are only used as a supplement to catch any edge cases or older meetings where
+    stored participants might be incomplete.
     
     Args:
         transcription: MeetingTranscription instance
         
     Returns:
-        Set of participant names (normalized - whitespace trimmed, case-insensitive for matching)
-        Note: Returns original case for display, but matching uses lowercase
+        Set of participant names (normalized - whitespace trimmed, preserves original case)
+        Note: Matching is done case-insensitively by normalizing to lowercase
     """
     participants = set()
     
@@ -35,7 +40,11 @@ def extract_participants_from_transcription(transcription: MeetingTranscription)
     bot_names = {'bot', 'ellie', 'recall', 'recall.ai', 'recall bot', 'ellie bot'}
     
     # Priority 1: Get participants from webhook events (stored in transcript_data.participants)
-    # This is the most accurate source as it's updated in real-time when participants join
+    # This is the PRIMARY and MOST ACCURATE source because:
+    # - It's populated when participants JOIN the meeting (via participant_events.join webhook)
+    # - It includes ALL participants who joined, even if they never spoke (silent participants)
+    # - It's updated in real-time as participants join/leave
+    # - It's the authoritative source for participant presence
     stored_participants = transcription.transcript_data.get('participants', [])
     if stored_participants and isinstance(stored_participants, list):
         for participant in stored_participants:
@@ -48,20 +57,36 @@ def extract_participants_from_transcription(transcription: MeetingTranscription)
                     # Exclude bots (not real participants for matching)
                     if normalized_name and normalized_name.lower() not in bot_names:
                         participants.add(normalized_name)
+            elif isinstance(participant, str):
+                # Handle case where participants is a list of strings
+                normalized_name = participant.strip()
+                if normalized_name and normalized_name.lower() not in bot_names:
+                    participants.add(normalized_name)
     
-    # Priority 2: Fallback to utterances (if no webhook participant data available)
-    if not participants:
-        utterances = transcription.utterances
-        if utterances and isinstance(utterances, list):
-            for utterance in utterances:
-                speaker = utterance.get('speaker')
-                
-                if speaker and isinstance(speaker, str):
-                    # Normalize: trim whitespace, preserve original case for display
-                    normalized_name = speaker.strip()
-                    # Exclude bots (not real participants for matching)
-                    if normalized_name and normalized_name.lower() not in bot_names:
-                        participants.add(normalized_name)
+    # Priority 2: SUPPLEMENT with utterances to catch any edge cases
+    # Utterances only include participants who SPOKE, so this is a supplement, not primary source
+    # We check this to catch:
+    # - Older meetings where stored participants might not be populated
+    # - Edge cases where a participant name might be spelled differently
+    # - Any participants that might have been missed in stored participants
+    utterances = transcription.utterances
+    if utterances and isinstance(utterances, list):
+        for utterance in utterances:
+            # Try multiple possible field names for speaker
+            speaker = (
+                utterance.get('speaker') or 
+                utterance.get('speaker_name') or 
+                utterance.get('speaker_label') or
+                utterance.get('participant') or
+                utterance.get('name')
+            )
+            
+            if speaker and isinstance(speaker, str):
+                # Normalize: trim whitespace, preserve original case for display
+                normalized_name = speaker.strip()
+                # Exclude bots (not real participants for matching)
+                if normalized_name and normalized_name.lower() not in bot_names:
+                    participants.add(normalized_name)
     
     return participants
 
@@ -293,13 +318,23 @@ def find_previous_meetings_with_participants(
     min_matching_participants: int = 1  # Not used, kept for backward compatibility
 ) -> list[MeetingTranscription]:
     """
-    Find previous completed meetings where ALL current participants were present.
+    Find previous completed meetings where ALL participants from that meeting are present in current meeting.
     
-    DYNAMIC MATCHING STRATEGY:
-    1. If only 1 participant → return empty (no nudges for solo meetings)
-    2. If 2+ participants → find meetings where ALL of them were present
-    3. Uses case-insensitive name matching for better matching
-    4. When a new participant joins, automatically updates to show meetings with ALL participants
+    INCLUSIVE MATCHING STRATEGY:
+    Shows nudges from previous meetings where ALL participants from the previous meeting are in the current meeting.
+    This means if current meeting has A+B+C, it will show nudges from:
+    - Previous A+B meetings (both A and B are in current)
+    - Previous A+C meetings (both A and C are in current)
+    - Previous B+C meetings (both B and C are in current)
+    - Previous A+B+C meetings (all are in current)
+    
+    But NOT from meetings that had participants not in the current meeting.
+    
+    Examples:
+    - Previous: A+B, Current: A+B+C → ✅ Show (A and B are both in current)
+    - Previous: A+C, Current: A+B+C → ✅ Show (A and C are both in current)
+    - Previous: A+B+C, Current: A+B → ❌ Don't show (C is missing from current)
+    - Previous: A+D, Current: A+B+C → ❌ Don't show (D is not in current)
     
     Args:
         backend_user_id: User ID
@@ -327,7 +362,7 @@ def find_previous_meetings_with_participants(
     print(f'[ContextualNudgesAPI] ==========================================')
     print(f'[ContextualNudgesAPI] 🔍 SEARCHING FOR MATCHING MEETINGS')
     print(f'[ContextualNudgesAPI] Current meeting has {len(current_participants_lower)} participants: {sorted([current_participants_normalized[p] for p in current_participants_lower])}')
-    print(f'[ContextualNudgesAPI] Will show meetings where ALL of these participants were present')
+    print(f'[ContextualNudgesAPI] Will show meetings where ALL participants from previous meeting are in current meeting')
     print(f'[ContextualNudgesAPI] ==========================================')
     
     # Get all completed transcriptions for this user that have contextual nudges
@@ -347,22 +382,39 @@ def find_previous_meetings_with_participants(
         # Extract participants from this meeting
         meeting_participants = extract_participants_from_transcription(transcription)
         
-        # Normalize meeting participants to lowercase for case-insensitive matching
-        meeting_participants_lower = {p.lower() for p in meeting_participants}
+        # Normalize meeting participants: strip whitespace and convert to lowercase for case-insensitive matching
+        # This must match the normalization done for current_participants
+        meeting_participants_lower = {p.strip().lower() for p in meeting_participants if p and p.strip()}
         
-        # Check if ALL current participants (case-insensitive) are present in this meeting
-        if current_participants_lower.issubset(meeting_participants_lower):
-            matching_transcriptions.append(transcription)
-            print(f'[ContextualNudgesAPI] ✅ MATCH FOUND: Meeting {transcription.id}')
-            print(f'[ContextualNudgesAPI]   Meeting participants: {sorted(list(meeting_participants))}')
-            print(f'[ContextualNudgesAPI]   Current participants: {sorted([current_participants_normalized[p] for p in current_participants_lower])}')
-            print(f'[ContextualNudgesAPI]   All current participants were present in this meeting')
+        # Debug: Log participant extraction for first few meetings to verify normalization
+        if len(matching_transcriptions) == 0 and len([t for t in transcriptions[:5] if t.id == transcription.id]) > 0:
+            print(f'[ContextualNudgesAPI] Checking meeting {transcription.id}:')
+            print(f'[ContextualNudgesAPI]   Meeting participants (original): {sorted(list(meeting_participants))}')
+            print(f'[ContextualNudgesAPI]   Meeting participants (normalized): {sorted(list(meeting_participants_lower))}')
+            print(f'[ContextualNudgesAPI]   Current participants (normalized): {sorted(list(current_participants_lower))}')
+            print(f'[ContextualNudgesAPI]   Nudges count: {len(transcription.contextual_nudges) if transcription.contextual_nudges else 0}')
+        
+        # Check if ALL participants from previous meeting are present in current meeting
+        # This means: previous meeting participants must be a subset of current meeting participants
+        # Example: Previous A+B, Current A+B+C → Show (A and B are both in current)
+        # Example: Previous A+B+C, Current A+B → Don't show (C is missing from current)
+        if meeting_participants_lower.issubset(current_participants_lower):
+            # Also ensure previous meeting had at least 2 participants (no solo meetings)
+            if len(meeting_participants_lower) >= 2:
+                matching_transcriptions.append(transcription)
+                print(f'[ContextualNudgesAPI] ✅ MATCH FOUND: Meeting {transcription.id}')
+                print(f'[ContextualNudgesAPI]   Previous meeting participants: {sorted(list(meeting_participants))}')
+                print(f'[ContextualNudgesAPI]   Current participants: {sorted([current_participants_normalized[p] for p in current_participants_lower])}')
+                print(f'[ContextualNudgesAPI]   All previous meeting participants are in current meeting')
         else:
             # Debug: Show why it didn't match (only for first few non-matches to avoid spam)
-            if len(matching_transcriptions) == 0 and len([t for t in transcriptions[:3] if t.id == transcription.id]) > 0:
-                missing = current_participants_lower - meeting_participants_lower
-                if missing:
-                    print(f'[ContextualNudgesAPI] ❌ No match: Meeting {transcription.id} missing participants: {sorted([current_participants_normalized[p] for p in missing])}')
+            if len(matching_transcriptions) == 0 and len([t for t in transcriptions[:5] if t.id == transcription.id]) > 0:
+                # Previous meeting has participants not in current meeting
+                extra = meeting_participants_lower - current_participants_lower
+                if extra:
+                    print(f'[ContextualNudgesAPI] ❌ No match: Previous meeting {transcription.id} has participants not in current: {sorted(list(extra))}')
+                elif len(meeting_participants_lower) < 2:
+                    print(f'[ContextualNudgesAPI] ❌ No match: Previous meeting {transcription.id} has only {len(meeting_participants_lower)} participant(s) (need at least 2)')
     
     print(f'[ContextualNudgesAPI] ==========================================')
     print(f'[ContextualNudgesAPI] Found {len(matching_transcriptions)} meetings where all participants were present')
