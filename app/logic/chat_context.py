@@ -5,7 +5,7 @@ Optimized to reduce API calls and improve accuracy
 """
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from django.utils import timezone
 from app.models import Calendar, CalendarEvent, MeetingTranscription, BotRecording
 
@@ -214,26 +214,225 @@ def extract_participants_from_transcription(transcription: MeetingTranscription)
     return participants
 
 
-def build_meeting_context(backend_user_id: str, question_intent: Dict[str, Any]) -> Dict[str, Any]:
+def find_relevant_transcript_segments(
+    question: str,
+    transcription: MeetingTranscription,
+    max_segments: int = 5
+) -> List[Dict[str, Any]]:
+    """
+    Find relevant transcript segments that relate to the question
+    Returns segments with timestamps and speaker info
+    
+    Args:
+        question: User's question
+        transcription: MeetingTranscription object
+        max_segments: Maximum number of segments to return
+        
+    Returns:
+        List of dicts with keys: 'text', 'speaker', 'start_time', 'end_time', 'relevance_score'
+    """
+    if not transcription or not transcription.utterances:
+        return []
+    
+    question_lower = question.lower()
+    question_words = set(re.findall(r'\b\w+\b', question_lower))
+    
+    # Remove common stop words
+    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'what', 'when', 'where', 'who', 'why', 'how', 'is', 'are', 'was', 'were', 'did', 'do', 'does', 'can', 'could', 'should', 'would', 'will', 'this', 'that', 'these', 'those'}
+    question_words = {w for w in question_words if w not in stop_words and len(w) > 2}
+    
+    if not question_words:
+        return []
+    
+    segments = []
+    utterances = transcription.utterances
+    
+    # If no structured utterances, try to extract from transcript_text (for live meetings)
+    if not utterances and transcription.transcript_text:
+        # Split transcript_text into sentences and create segments
+        sentences = re.split(r'[.!?]+', transcription.transcript_text)
+        for i, sentence in enumerate(sentences[:max_segments * 2]):  # Check more sentences to find relevant ones
+            sentence = sentence.strip()
+            if not sentence or len(sentence) < 10:
+                continue
+            
+            sentence_lower = sentence.lower()
+            sentence_words = set(re.findall(r'\b\w+\b', sentence_lower))
+            
+            # Calculate relevance
+            matching_words = question_words.intersection(sentence_words)
+            relevance_score = len(matching_words) / max(len(question_words), 1)
+            
+            if relevance_score > 0:
+                segments.append({
+                    'text': sentence,
+                    'speaker': 'Unknown',
+                    'start_time': i * 10,  # Approximate timestamp
+                    'end_time': (i + 1) * 10,
+                    'relevance_score': relevance_score
+                })
+    else:
+        # Use structured utterances
+        for utterance in utterances:
+            if not isinstance(utterance, dict):
+                continue
+            
+            text = utterance.get('text', '') or utterance.get('words', '')
+            if isinstance(text, list):
+                # If words is a list, extract text from word objects
+                text = ' '.join([w.get('text', '') if isinstance(w, dict) else str(w) for w in text])
+            
+            if not text or not isinstance(text, str):
+                continue
+            
+            text_lower = text.lower()
+            text_words = set(re.findall(r'\b\w+\b', text_lower))
+            
+            # Calculate relevance: count matching words
+            matching_words = question_words.intersection(text_words)
+            relevance_score = len(matching_words) / max(len(question_words), 1)
+            
+            # Only include segments with some relevance
+            if relevance_score > 0:
+                segment = {
+                    'text': text.strip(),
+                    'speaker': utterance.get('speaker') or utterance.get('speaker_name') or 'Unknown',
+                    'start_time': utterance.get('start') or utterance.get('start_time') or 0,
+                    'end_time': utterance.get('end') or utterance.get('end_time') or 0,
+                    'relevance_score': relevance_score
+                }
+                segments.append(segment)
+    
+    # Sort by relevance score (highest first) and return top segments
+    segments.sort(key=lambda x: x['relevance_score'], reverse=True)
+    return segments[:max_segments]
+
+
+def calculate_context_confidence(
+    question: str,
+    meeting_context_data: Dict[str, Any],
+    relevant_segments: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Calculate confidence score for answering the question based on available context
+    
+    Returns:
+        {
+            'confidence_score': float (0.0-1.0),
+            'has_sufficient_context': bool,
+            'relevant_segments_count': int,
+            'context_type': 'live' | 'previous' | 'none',
+            'reasoning': str
+        }
+    """
+    question_lower = question.lower()
+    
+    # Check if question is about live meeting
+    live_keywords = ['current', 'live', 'ongoing', 'right now', 'happening now', 'current meeting', 'live meeting']
+    is_live_question = any(kw in question_lower for kw in live_keywords)
+    
+    has_live_meetings = meeting_context_data.get('has_live_meetings', False)
+    context_text = meeting_context_data.get('context_text', '')
+    
+    # Base confidence factors
+    confidence_score = 0.0
+    reasoning_parts = []
+    
+    # Factor 1: Context availability (0.3 weight)
+    if context_text and len(context_text.strip()) > 50:
+        context_confidence = 0.3
+        reasoning_parts.append("Context available")
+    else:
+        context_confidence = 0.0
+        reasoning_parts.append("No context available")
+    
+    # Factor 2: Relevant segments found (0.4 weight)
+    if relevant_segments:
+        # Higher confidence if more relevant segments found
+        segment_confidence = min(0.4, len(relevant_segments) * 0.1)
+        avg_relevance = sum(s.get('relevance_score', 0) for s in relevant_segments) / len(relevant_segments)
+        segment_confidence *= avg_relevance  # Weight by average relevance
+        reasoning_parts.append(f"Found {len(relevant_segments)} relevant transcript segments")
+    else:
+        segment_confidence = 0.0
+        reasoning_parts.append("No relevant transcript segments found")
+    
+    # Factor 3: Question-context alignment (0.3 weight)
+    if is_live_question and has_live_meetings:
+        alignment_confidence = 0.3
+        reasoning_parts.append("Question matches live meeting context")
+    elif not is_live_question and context_text:
+        # Check if context contains relevant keywords from question
+        question_keywords = set(re.findall(r'\b\w+\b', question_lower))
+        context_lower = context_text.lower()
+        matching_keywords = [kw for kw in question_keywords if kw in context_lower and len(kw) > 3]
+        if matching_keywords:
+            alignment_confidence = min(0.3, len(matching_keywords) * 0.05)
+            reasoning_parts.append(f"Context contains relevant keywords: {len(matching_keywords)}")
+        else:
+            alignment_confidence = 0.1
+            reasoning_parts.append("Limited keyword alignment between question and context")
+    else:
+        alignment_confidence = 0.0
+        reasoning_parts.append("Question-context mismatch")
+    
+    confidence_score = context_confidence + segment_confidence + alignment_confidence
+    
+    # Determine if context is sufficient (threshold: 0.5)
+    has_sufficient_context = confidence_score >= 0.5
+    
+    # Determine context type
+    if has_live_meetings and (is_live_question or not context_text):
+        context_type = 'live'
+    elif context_text and not has_live_meetings:
+        context_type = 'previous'
+    else:
+        context_type = 'none'
+    
+    return {
+        'confidence_score': min(1.0, max(0.0, confidence_score)),
+        'has_sufficient_context': has_sufficient_context,
+        'relevant_segments_count': len(relevant_segments),
+        'context_type': context_type,
+        'reasoning': '; '.join(reasoning_parts)
+    }
+
+
+def build_meeting_context(
+    backend_user_id: str,
+    question_intent: Dict[str, Any],
+    question: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Build meeting context for chat bot with smart filtering
+    
+    Args:
+        backend_user_id: User ID
+        question_intent: Intent analysis result
+        question: Original question (optional, for finding relevant segments)
     
     Returns:
         {
             'context_text': str,  # Formatted context for prompt
             'has_live_meetings': bool,
-            'live_meeting_count': int
+            'live_meeting_count': int,
+            'live_transcription': MeetingTranscription | None,  # Most recent live transcription
+            'relevant_segments': List[Dict],  # Relevant transcript segments with timestamps
         }
     """
     context_parts = []
     has_live_meetings = False
     live_meeting_count = 0
+    live_transcription = None
+    relevant_segments = []
     
     if not question_intent['needs_meeting_context']:
         return {
             'context_text': '',
             'has_live_meetings': False,
-            'live_meeting_count': 0
+            'live_meeting_count': 0,
+            'live_transcription': None,
+            'relevant_segments': []
         }
     
     now = timezone.now()
@@ -255,6 +454,11 @@ def build_meeting_context(backend_user_id: str, question_intent: Dict[str, Any])
         if live_transcriptions:
             has_live_meetings = True
             live_meeting_count = len(live_transcriptions)
+            live_transcription = live_transcriptions[0]  # Store most recent for segment extraction
+            
+            # Find relevant segments if question is provided
+            if question and live_transcription:
+                relevant_segments = find_relevant_transcript_segments(question, live_transcription)
             
             context_parts.append("CURRENTLY LIVE MEETINGS (Real-time):")
             for transcription in live_transcriptions[:3]:  # Limit to 3 live meetings
@@ -391,5 +595,7 @@ Action Items: {action_items_str}
     return {
         'context_text': context_text,
         'has_live_meetings': has_live_meetings,
-        'live_meeting_count': live_meeting_count
+        'live_meeting_count': live_meeting_count,
+        'live_transcription': live_transcription,
+        'relevant_segments': relevant_segments
     }

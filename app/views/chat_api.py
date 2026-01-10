@@ -13,7 +13,12 @@ from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from app.views.calendar_api import add_cors_headers, get_backend_user_id_from_request
-from app.logic.chat_context import analyze_question_intent, build_meeting_context
+from app.logic.chat_context import (
+    analyze_question_intent,
+    build_meeting_context,
+    calculate_context_confidence,
+    find_relevant_transcript_segments
+)
 
 # Simple in-memory response cache (to reduce Groq API calls)
 _response_cache = {}
@@ -142,9 +147,45 @@ def clean_response(text):
     return text
 
 
-def build_system_prompt(meeting_context: str, question_intent: dict) -> str:
-    """Build system prompt with optional meeting context"""
+def build_system_prompt(
+    meeting_context: str,
+    question_intent: dict,
+    confidence_score: float = 1.0,
+    relevant_segments: list = None
+) -> str:
+    """Build system prompt with optional meeting context and confidence-aware instructions"""
     prompt = BASE_SYSTEM_PROMPT
+    
+    # Add confidence-aware instructions
+    if meeting_context and question_intent.get('needs_meeting_context'):
+        if confidence_score < 0.5:
+            prompt += """
+
+CRITICAL: You have LOW CONFIDENCE context for this question. You MUST:
+- Only answer if you are CERTAIN the information is in the provided context
+- If uncertain, respond with: "I don't have enough information from the current meeting to answer that. Could you provide more details?"
+- NEVER guess or make up information
+- NEVER provide irrelevant information from other meetings"""
+        elif confidence_score < 0.7:
+            prompt += """
+
+IMPORTANT: You have MODERATE confidence context. You should:
+- Start your answer with "Based on what's discussed so far..." if referring to live meeting
+- Only answer if the information is reasonably clear in the context
+- If uncertain, ask for clarification rather than guessing"""
+        else:
+            prompt += """
+
+You have HIGH confidence context. You can answer confidently, but still:
+- Ground your answer in specific transcript segments when possible
+- Reference what was actually said, not assumptions"""
+        
+        # Add grounding requirement
+        if relevant_segments:
+            prompt += """
+
+GROUNDING REQUIREMENT: You MUST ground your answer in specific transcript segments.
+Reference what was actually said, by whom, and when possible."""
     
     if meeting_context:
         # Add specific instructions based on question type
@@ -156,7 +197,8 @@ def build_system_prompt(meeting_context: str, question_intent: dict) -> str:
 === END LIVE MEETING CONTEXT ===
 
 The user is asking about the CURRENTLY LIVE meeting. Use the live meeting transcript above to answer.
-Focus on what's happening right now in the live meeting."""
+Focus on what's happening right now in the live meeting.
+CRITICAL: Only answer if the information is clearly present in the transcript above."""
         elif question_intent.get('person_filter'):
             person_name = question_intent['person_filter']
             prompt += f"""
@@ -240,17 +282,50 @@ def api_chat(request):
         meeting_context_data = {
             'context_text': '',
             'has_live_meetings': False,
-            'live_meeting_count': 0
+            'live_meeting_count': 0,
+            'live_transcription': None,
+            'relevant_segments': []
         }
         
         if question_intent['needs_meeting_context'] and backend_user_id:
-            meeting_context_data = build_meeting_context(backend_user_id, question_intent)
+            meeting_context_data = build_meeting_context(backend_user_id, question_intent, user_message)
             print(f'[ChatAPI] Meeting context built (length: {len(meeting_context_data["context_text"])} chars)')
             print(f'[ChatAPI] Has live meetings: {meeting_context_data["has_live_meetings"]}')
             print(f'[ChatAPI] Live meeting count: {meeting_context_data["live_meeting_count"]}')
+            print(f'[ChatAPI] Relevant segments found: {len(meeting_context_data["relevant_segments"])}')
         
-        # Build system prompt
-        system_prompt = build_system_prompt(meeting_context_data['context_text'], question_intent)
+        # Calculate context confidence
+        confidence_data = calculate_context_confidence(
+            user_message,
+            meeting_context_data,
+            meeting_context_data.get('relevant_segments', [])
+        )
+        confidence_score = confidence_data['confidence_score']
+        has_sufficient_context = confidence_data['has_sufficient_context']
+        
+        print(f'[ChatAPI] Context confidence: {confidence_score:.2f} (sufficient: {has_sufficient_context})')
+        print(f'[ChatAPI] Confidence reasoning: {confidence_data["reasoning"]}')
+        
+        # Build system prompt with confidence-aware instructions
+        system_prompt = build_system_prompt(
+            meeting_context_data['context_text'],
+            question_intent,
+            confidence_score,
+            meeting_context_data.get('relevant_segments', [])
+        )
+        
+        # Determine response state based on confidence
+        if confidence_score < 0.5 and question_intent['needs_meeting_context']:
+            # Low confidence - should not answer or ask for clarification
+            response_state = 'no_answer'
+        elif confidence_score < 0.7 and question_intent['needs_meeting_context']:
+            # Moderate confidence - tentative answer
+            response_state = 'tentative'
+        else:
+            # High confidence or general question - confident answer
+            response_state = 'confident'
+        
+        print(f'[ChatAPI] Response state: {response_state}')
         
         # Check if Groq is available
         if Groq is None:
@@ -291,8 +366,29 @@ def api_chat(request):
                     del _response_cache[cache_key]
                     cache_key = None
         
+        # Initialize formatted_segments
+        formatted_segments = []
+        
+        # If confidence is too low and question needs meeting context, skip API call and return clarification request
+        if response_state == 'no_answer' and question_intent['needs_meeting_context']:
+            print(f'[ChatAPI] Confidence too low ({confidence_score:.2f}) - returning clarification request')
+            response_text = "I don't have enough information from the current meeting to answer that. Could you provide more details or rephrase your question?"
+            
+            # Format relevant segments for response (even if low confidence, show what we found)
+            for seg in meeting_context_data.get('relevant_segments', [])[:3]:
+                start_time = seg.get('start_time', 0)
+                minutes = int(start_time // 60)
+                seconds = int(start_time % 60)
+                time_str = f"{minutes}:{seconds:02d}"
+                formatted_segments.append({
+                    'text': seg.get('text', '')[:200],  # Truncate long segments
+                    'speaker': seg.get('speaker', 'Unknown'),
+                    'timestamp': time_str,
+                    'start_time': start_time,
+                    'relevance_score': seg.get('relevance_score', 0)
+                })
         # Call Groq API only if not cached
-        if cache_key is None or cache_key not in _response_cache:
+        elif cache_key is None or cache_key not in _response_cache:
             # Build messages for Groq
             messages = [{"role": "system", "content": system_prompt}]
             
@@ -322,6 +418,11 @@ def api_chat(request):
             # Clean response
             response_text = clean_response(response_text)
             
+            # Add tentative prefix if needed
+            if response_state == 'tentative' and question_intent.get('live_meeting_only'):
+                if not response_text.lower().startswith('based on'):
+                    response_text = f"Based on what's discussed so far, {response_text.lower()}"
+            
             # Cache the response
             if backend_user_id and cache_key:
                 # Limit cache size
@@ -342,22 +443,38 @@ def api_chat(request):
         
         # Get bot_id from live meeting if available (for contextual nudges)
         bot_id = None
-        if meeting_context_data['has_live_meetings'] and backend_user_id:
-            # Get the most recent live meeting transcription to extract bot_id
-            from app.models import MeetingTranscription
-            live_transcription = MeetingTranscription.objects.filter(
-                backend_user_id=backend_user_id,
-                status='processing'
-            ).order_by('-updated_at').first()
-            if live_transcription:
-                bot_id = live_transcription.bot_id
+        live_transcription = meeting_context_data.get('live_transcription')
+        if live_transcription:
+            bot_id = live_transcription.bot_id
+        
+        # Format relevant segments for response (with timestamps) if not already done
+        if not formatted_segments:
+            for seg in meeting_context_data.get('relevant_segments', [])[:5]:
+                start_time = seg.get('start_time', 0)
+                minutes = int(start_time // 60)
+                seconds = int(start_time % 60)
+                time_str = f"{minutes}:{seconds:02d}"
+                
+                formatted_segments.append({
+                    'text': seg.get('text', '')[:300],  # Truncate for response
+                    'speaker': seg.get('speaker', 'Unknown'),
+                    'timestamp': time_str,
+                    'start_time': start_time,
+                    'relevance_score': seg.get('relevance_score', 0)
+                })
         
         response = JsonResponse({
             'response': response_text,
             'success': True,
             'has_live_meetings': meeting_context_data['has_live_meetings'],
             'live_meeting_count': meeting_context_data['live_meeting_count'],
-            'bot_id': bot_id  # Include bot_id for contextual nudges
+            'bot_id': bot_id,  # Include bot_id for contextual nudges
+            # Context confidence data
+            'confidence_score': confidence_score,
+            'response_state': response_state,  # 'confident', 'tentative', or 'no_answer'
+            'has_sufficient_context': has_sufficient_context,
+            'grounded_segments': formatted_segments,  # Relevant transcript segments with timestamps
+            'confidence_reasoning': confidence_data.get('reasoning', '')
         })
         return add_cors_headers(response, request)
         

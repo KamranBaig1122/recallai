@@ -315,7 +315,8 @@ def find_previous_meetings_with_participants(
     backend_user_id: str,
     current_participants: list,
     current_participant_ids: dict = None,  # Not used, kept for backward compatibility
-    min_matching_participants: int = 1  # Not used, kept for backward compatibility
+    min_matching_participants: int = 1,  # Not used, kept for backward compatibility
+    folder_id: str = None  # Optional folder ID to scope search to specific folder
 ) -> list[MeetingTranscription]:
     """
     Find previous completed meetings where ALL participants from that meeting are present in current meeting.
@@ -330,6 +331,11 @@ def find_previous_meetings_with_participants(
     
     But NOT from meetings that had participants not in the current meeting.
     
+    FOLDER SCOPING:
+    If folder_id is provided, the search is LIMITED to only meetings within that folder.
+    This minimizes database queries by searching only relevant meetings, not all user meetings.
+    If folder_id is None, searches across all user meetings (backward compatible).
+    
     Examples:
     - Previous: A+B, Current: A+B+C → ✅ Show (A and B are both in current)
     - Previous: A+C, Current: A+B+C → ✅ Show (A and C are both in current)
@@ -341,6 +347,7 @@ def find_previous_meetings_with_participants(
         current_participants: List of current meeting participant names
         current_participant_ids: Not used, kept for backward compatibility
         min_matching_participants: Not used, kept for backward compatibility
+        folder_id: Optional folder ID to scope search to specific folder (UUID string)
         
     Returns:
         List of MeetingTranscription objects with matching participants
@@ -363,16 +370,37 @@ def find_previous_meetings_with_participants(
     print(f'[ContextualNudgesAPI] 🔍 SEARCHING FOR MATCHING MEETINGS')
     print(f'[ContextualNudgesAPI] Current meeting has {len(current_participants_lower)} participants: {sorted([current_participants_normalized[p] for p in current_participants_lower])}')
     print(f'[ContextualNudgesAPI] Will show meetings where ALL participants from previous meeting are in current meeting')
+    
+    # Log folder scoping if folder_id is provided
+    if folder_id:
+        print(f'[ContextualNudgesAPI] 📁 FOLDER SCOPE: Searching ONLY within folder {folder_id} (meetings scoped to this folder)')
+    else:
+        print(f'[ContextualNudgesAPI] 🌐 GLOBAL SEARCH: Searching across ALL user meetings (no folder scope)')
     print(f'[ContextualNudgesAPI] ==========================================')
     
     # Get all completed transcriptions for this user that have contextual nudges
-    transcriptions = MeetingTranscription.objects.filter(
+    transcriptions_query = MeetingTranscription.objects.filter(
         backend_user_id=backend_user_id,
         status='completed',
         contextual_nudges__isnull=False
     ).exclude(
         contextual_nudges=[]  # Exclude empty arrays
-    ).order_by('-created_at')  # Most recent first
+    )
+    
+    # IMPORTANT: If folder_id is provided, scope the search to ONLY meetings within that folder
+    # This aligns with frontend expectations and minimizes database queries
+    if folder_id:
+        try:
+            # Convert folder_id string to UUID for filtering
+            import uuid as uuid_lib
+            folder_uuid = uuid_lib.UUID(folder_id)
+            transcriptions_query = transcriptions_query.filter(folder_id=folder_uuid)
+            print(f'[ContextualNudgesAPI] ✅ Filtering by folder_id: {folder_id}')
+        except (ValueError, TypeError) as e:
+            print(f'[ContextualNudgesAPI] ⚠ WARNING: Invalid folder_id format "{folder_id}": {e}. Ignoring folder filter.')
+            # Continue without folder filter if folder_id is invalid
+    
+    transcriptions = transcriptions_query.order_by('-created_at')  # Most recent first
     
     print(f'[ContextualNudgesAPI] Checking {len(transcriptions)} completed meetings with contextual nudges')
     
@@ -418,6 +446,10 @@ def find_previous_meetings_with_participants(
     
     print(f'[ContextualNudgesAPI] ==========================================')
     print(f'[ContextualNudgesAPI] Found {len(matching_transcriptions)} meetings where all participants were present')
+    if folder_id:
+        print(f'[ContextualNudgesAPI] (Search was scoped to folder {folder_id} only)')
+    else:
+        print(f'[ContextualNudgesAPI] (Search was across all user meetings - no folder scope)')
     print(f'[ContextualNudgesAPI] ==========================================')
     
     return matching_transcriptions
@@ -483,15 +515,23 @@ def api_get_contextual_nudges(request):
     """
     API endpoint to get contextual nudges for the current live meeting.
     
+    IMPORTANT: This endpoint supports folder-scoped search. If folderId is provided,
+    the search for matching meetings is LIMITED to only meetings within that folder.
+    This minimizes database queries by searching only relevant meetings, not all user meetings.
+    
     Query Parameters:
         - userId: User ID (optional if JWT token is provided)
         - botId: Bot ID of current live meeting (optional, but required for live meeting)
+        - folderId: Folder ID to scope nudges search to (optional, but recommended for folder-scoped search)
     
     Returns:
         JSON response with:
         - success: bool
         - has_live_meeting: bool
         - live_meeting_bot_id: str | None
+        - live_meeting_id: str | None (UUID of live meeting transcription)
+        - live_meeting_folder_id: str | None (UUID of folder assigned to live meeting)
+        - live_meeting_folder_name: str | None (Folder name - may be None if not available in this backend)
         - current_participants: list[str]
         - nudges: list[dict]
         - total_nudges: int
@@ -513,10 +553,18 @@ def api_get_contextual_nudges(request):
         # Get bot_id from query params (optional)
         bot_id = request.GET.get('botId') or request.GET.get('bot_id')
         
+        # Get folder_id from query params (optional, but recommended for folder-scoped search)
+        folder_id = request.GET.get('folderId') or request.GET.get('folder_id')
+        
         print(f'[ContextualNudgesAPI] ==========================================')
         print(f'[ContextualNudgesAPI] 📋 GET CONTEXTUAL NUDGES REQUEST')
         print(f'[ContextualNudgesAPI] User ID: {backend_user_id}')
         print(f'[ContextualNudgesAPI] Bot ID: {bot_id or "Not provided (will find most recent)"}')
+        print(f'[ContextualNudgesAPI] Folder ID: {folder_id or "Not provided (will search all meetings)"}')
+        if folder_id:
+            print(f'[ContextualNudgesAPI] ✅ FOLDER SCOPE: Search will be LIMITED to folder {folder_id} only')
+        else:
+            print(f'[ContextualNudgesAPI] ⚠ WARNING: No folderId provided - searching across ALL user meetings (less efficient)')
         print(f'[ContextualNudgesAPI] ==========================================')
         
         # Step 1: Get current live meeting participants
@@ -528,10 +576,30 @@ def api_get_contextual_nudges(request):
         # Check if we have a live meeting (either via transcription or via live bot)
         has_live_meeting = live_transcription is not None
         live_bot_id = None
+        live_meeting_id = None
+        live_meeting_folder_id = None
         
         if live_transcription:
             live_bot_id = live_transcription.bot_id
+            live_meeting_id = str(live_transcription.id)
+            live_meeting_folder_id = str(live_transcription.folder_id) if live_transcription.folder_id else None
             has_live_meeting = True
+            
+            # Log folder information from live meeting
+            if live_meeting_folder_id:
+                print(f'[ContextualNudgesAPI] ✅ Live meeting has folder_id: {live_meeting_folder_id}')
+            else:
+                print(f'[ContextualNudgesAPI] ⚠ Live meeting has no folder_id (unresolved meeting)')
+            
+            # If folder_id was provided in request, validate it matches the live meeting's folder_id
+            # If they don't match, use the live meeting's folder_id (it's the source of truth)
+            if folder_id and live_meeting_folder_id and folder_id != live_meeting_folder_id:
+                print(f'[ContextualNudgesAPI] ⚠ WARNING: Request folder_id ({folder_id}) does not match live meeting folder_id ({live_meeting_folder_id}). Using live meeting folder_id.')
+                folder_id = live_meeting_folder_id
+            elif not folder_id and live_meeting_folder_id:
+                # If no folder_id provided but live meeting has one, use it for scoping
+                print(f'[ContextualNudgesAPI] ℹ INFO: No folder_id in request, but live meeting has folder_id. Using live meeting folder_id for scoping.')
+                folder_id = live_meeting_folder_id
         else:
             # No transcription found - this means no live meeting
             # Don't check BotRecording alone - we need both bot AND transcription to be live
@@ -544,6 +612,9 @@ def api_get_contextual_nudges(request):
                 'success': True,
                 'has_live_meeting': False,
                 'live_meeting_bot_id': None,
+                'live_meeting_id': None,
+                'live_meeting_folder_id': None,
+                'live_meeting_folder_name': None,
                 'current_participants': [],
                 'nudges': [],
                 'total_nudges': 0,
@@ -557,6 +628,9 @@ def api_get_contextual_nudges(request):
                 'success': True,
                 'has_live_meeting': True,
                 'live_meeting_bot_id': live_bot_id,
+                'live_meeting_id': live_meeting_id,
+                'live_meeting_folder_id': live_meeting_folder_id,
+                'live_meeting_folder_name': None,  # Folder name not available in this backend
                 'current_participants': [],
                 'nudges': [],
                 'total_nudges': 0,
@@ -565,17 +639,24 @@ def api_get_contextual_nudges(request):
             return add_cors_headers(response, request)
         
         # Step 2: Find previous meetings where ALL current participants were present
+        # IMPORTANT: Pass folder_id to scope the search to only meetings within that folder
         matching_meetings = find_previous_meetings_with_participants(
             backend_user_id,
-            current_participants
+            current_participants,
+            folder_id=folder_id  # Scope search to folder if provided
         )
         
         if not matching_meetings:
             print(f'[ContextualNudgesAPI] No previous meetings found with matching participants')
+            if folder_id:
+                print(f'[ContextualNudgesAPI] (Search was scoped to folder {folder_id})')
             response = JsonResponse({
                 'success': True,
                 'has_live_meeting': True,
                 'live_meeting_bot_id': live_bot_id,
+                'live_meeting_id': live_meeting_id,
+                'live_meeting_folder_id': live_meeting_folder_id,
+                'live_meeting_folder_name': None,  # Folder name not available in this backend
                 'current_participants': current_participants,
                 'nudges': [],
                 'total_nudges': 0,
@@ -587,13 +668,18 @@ def api_get_contextual_nudges(request):
         all_nudges = extract_nudges_from_meetings(matching_meetings)
         
         print(f'[ContextualNudgesAPI] ✅ Successfully retrieved {len(all_nudges)} contextual nudges')
+        if folder_id:
+            print(f'[ContextualNudgesAPI] (Search was scoped to folder {folder_id} - only meetings within this folder were searched)')
         print(f'[ContextualNudgesAPI] ==========================================')
         
-        # Include bot_id in response for frontend to use in polling
+        # Include all meeting and folder information in response for frontend
         response_data = {
             'success': True,
             'has_live_meeting': True,
             'live_meeting_bot_id': live_bot_id,
+            'live_meeting_id': live_meeting_id,
+            'live_meeting_folder_id': live_meeting_folder_id,
+            'live_meeting_folder_name': None,  # Folder name not available in this backend - frontend can fetch if needed
             'current_participants': current_participants,
             'nudges': all_nudges,
             'total_nudges': len(all_nudges)
