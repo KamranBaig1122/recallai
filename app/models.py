@@ -267,6 +267,25 @@ class MeetingTranscription(models.Model):
         return self.transcript_data.get('action_items', [])
 
 
+class FolderMeetingsOverview(models.Model):
+    """
+    Cached Groq-synthesized single summary and merged action items for all meetings in a folder (client view).
+    Invalidated when source_signature (derived from child transcription ids + updated_at) changes.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    folder_id = models.UUIDField(db_index=True)
+    backend_user_id = models.UUIDField(db_index=True)
+    source_signature = models.CharField(max_length=64)
+    summary = models.TextField(blank=True, default='')
+    action_items = JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'folder_meetings_overviews'
+        unique_together = [['folder_id', 'backend_user_id']]
+
+
 class Notification(models.Model):
     """Stores in-app notifications for users"""
     NOTIFICATION_TYPES = [
