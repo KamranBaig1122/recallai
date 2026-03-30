@@ -416,14 +416,18 @@ def bot_webhook(request, bot_id=None):
                                                             if groq_result:
                                                                 summary = groq_result.get("summary", "")
                                                                 action_items = groq_result.get("action_items", [])
+                                                                meeting_gaps = groq_result.get("meeting_gaps") or []
+                                                                open_questions = groq_result.get("open_questions") or []
                                                                 
                                                                 # Initialize transcript_data before using it
                                                                 transcript_data = transcription_check.transcript_data.copy() if transcription_check.transcript_data else {}
+                                                                transcription_check.impact_score = None
+                                                                transcript_data.pop('impact_breakdown', None)
                                                                 
-                                                                # Generate contextual nudges and impact score
+                                                                # Generate contextual nudges and key outcomes/signals (replaces legacy impact score)
                                                                 nudge_result = None
                                                                 try:
-                                                                    from app.services.groq.nudge_analyzer import generate_contextual_nudges_and_impact_score_with_groq
+                                                                    from app.services.groq.nudge_analyzer import generate_contextual_nudges_and_signals_with_groq
                                                                     from app.models import MeetingTranscription
                                                                     
                                                                     # Get previous meetings for context
@@ -444,7 +448,7 @@ def bot_webhook(request, bot_id=None):
                                                                             if t.summary
                                                                         ]
                                                                     
-                                                                    nudge_result = generate_contextual_nudges_and_impact_score_with_groq(
+                                                                    nudge_result = generate_contextual_nudges_and_signals_with_groq(
                                                                         transcript_text=transcription_check.transcript_text,
                                                                         summary=summary,
                                                                         action_items=action_items,
@@ -453,14 +457,12 @@ def bot_webhook(request, bot_id=None):
                                                                     
                                                                     if nudge_result:
                                                                         contextual_nudges = nudge_result.get("contextual_nudges", [])
-                                                                        impact_score = nudge_result.get("impact_score")
-                                                                        impact_breakdown = nudge_result.get("impact_breakdown", {})
+                                                                        key_outcomes_signals = nudge_result.get("key_outcomes_signals") or []
                                                                         
                                                                         transcription_check.contextual_nudges = contextual_nudges
-                                                                        transcription_check.impact_score = impact_score
-                                                                        transcript_data['impact_breakdown'] = impact_breakdown
+                                                                        transcription_check.key_outcomes_signals = key_outcomes_signals
                                                                         
-                                                                        print(f'[bot-wh] [DELAYED CHECK] ✓ Generated {len(contextual_nudges)} nudges and impact score: {impact_score}')
+                                                                        print(f'[bot-wh] [DELAYED CHECK] ✓ Generated {len(contextual_nudges)} nudges and {len(key_outcomes_signals)} key outcome signals')
                                                                 except Exception as nudge_error:
                                                                     print(f'[bot-wh] [DELAYED CHECK] ⚠ WARNING: Error generating nudges: {nudge_error}')
                                                                 transcript_data['summary'] = summary
@@ -468,6 +470,8 @@ def bot_webhook(request, bot_id=None):
                                                                 
                                                                 transcription_check.summary = summary
                                                                 transcription_check.action_items = action_items
+                                                                transcription_check.meeting_gaps = meeting_gaps
+                                                                transcription_check.open_questions = open_questions
                                                                 transcription_check.status = 'completed'
                                                                 transcription_check.transcript_data = transcript_data
                                                                 transcription_check.save()
@@ -478,7 +482,7 @@ def bot_webhook(request, bot_id=None):
                                                                     bot_recording.save()
                                                                     print(f'[bot-wh] [DELAYED CHECK] ✓ Updated BotRecording.status to "completed" for bot {bot_id}')
                                                                 
-                                                                print(f'[bot-wh] [DELAYED CHECK] ✓ Generated and saved summary ({len(summary)} chars), {len(action_items)} action items, nudges, and impact score')
+                                                                print(f'[bot-wh] [DELAYED CHECK] ✓ Generated and saved summary ({len(summary)} chars), {len(action_items)} action items, nudges, gaps, and open questions')
                                                                 print(f'[bot-wh] [DELAYED CHECK] ==========================================')
                                                                 print(f'[bot-wh] [DELAYED CHECK] ✅ TRANSCRIPTION PROCESSING COMPLETE (via delayed check)')
                                                                 print(f'[bot-wh] [DELAYED CHECK] ==========================================')
@@ -777,14 +781,18 @@ def bot_webhook(request, bot_id=None):
                                                     # Update transcription with Groq results
                                                     summary = groq_result.get("summary", "")
                                                     action_items = groq_result.get("action_items", [])
+                                                    meeting_gaps = groq_result.get("meeting_gaps") or []
+                                                    open_questions = groq_result.get("open_questions") or []
                                                     
                                                     # Preserve existing transcript data structure (initialize before using)
                                                     transcript_data = existing_transcription.transcript_data.copy() if existing_transcription.transcript_data else {}
+                                                    existing_transcription.impact_score = None
+                                                    transcript_data.pop('impact_breakdown', None)
                                                     
-                                                    # Generate contextual nudges and impact score
+                                                    # Generate contextual nudges and key outcomes/signals
                                                     nudge_result = None
                                                     try:
-                                                        from app.services.groq.nudge_analyzer import generate_contextual_nudges_and_impact_score_with_groq
+                                                        from app.services.groq.nudge_analyzer import generate_contextual_nudges_and_signals_with_groq
                                                         from app.models import MeetingTranscription
                                                         
                                                         # Get previous meetings for context
@@ -805,7 +813,7 @@ def bot_webhook(request, bot_id=None):
                                                                 if t.summary
                                                             ]
                                                         
-                                                        nudge_result = generate_contextual_nudges_and_impact_score_with_groq(
+                                                        nudge_result = generate_contextual_nudges_and_signals_with_groq(
                                                             transcript_text=transcript_text,
                                                             summary=summary,
                                                             action_items=action_items,
@@ -814,15 +822,13 @@ def bot_webhook(request, bot_id=None):
                                                         
                                                         if nudge_result:
                                                             contextual_nudges = nudge_result.get("contextual_nudges", [])
-                                                            impact_score = nudge_result.get("impact_score")
-                                                            impact_breakdown = nudge_result.get("impact_breakdown", {})
+                                                            key_outcomes_signals = nudge_result.get("key_outcomes_signals") or []
                                                             
                                                             if existing_transcription:
                                                                 existing_transcription.contextual_nudges = contextual_nudges
-                                                                existing_transcription.impact_score = impact_score
-                                                                transcript_data['impact_breakdown'] = impact_breakdown
+                                                                existing_transcription.key_outcomes_signals = key_outcomes_signals
                                                                 
-                                                                print(f'[bot-wh] [FALLBACK] ✓ Generated {len(contextual_nudges)} nudges and impact score: {impact_score}')
+                                                                print(f'[bot-wh] [FALLBACK] ✓ Generated {len(contextual_nudges)} nudges and {len(key_outcomes_signals)} key outcome signals')
                                                     except Exception as nudge_error:
                                                         print(f'[bot-wh] [FALLBACK] ⚠ WARNING: Error generating nudges: {nudge_error}')
                                                     
@@ -830,6 +836,8 @@ def bot_webhook(request, bot_id=None):
                                                     if existing_transcription:
                                                         existing_transcription.summary = summary
                                                         existing_transcription.action_items = action_items
+                                                        existing_transcription.meeting_gaps = meeting_gaps
+                                                        existing_transcription.open_questions = open_questions
                                                         existing_transcription.status = 'completed'
                                                         transcript_data['summary'] = summary
                                                         transcript_data['action_items'] = action_items
@@ -843,7 +851,7 @@ def bot_webhook(request, bot_id=None):
                                                             bot_recording.save()
                                                             print(f'[bot-wh] [FALLBACK] ✓ Updated BotRecording.status to "completed" for bot {bot_id}')
                                                         
-                                                        print(f'[bot-wh] [FALLBACK] ✓ Updated transcription with summary, action items, nudges, and impact score')
+                                                        print(f'[bot-wh] [FALLBACK] ✓ Updated transcription with summary, action items, nudges, gaps, and open questions')
                                                     else:
                                                         # Create new transcription record
                                                         # Get backend_user_id from calendar_event
@@ -991,13 +999,19 @@ def bot_webhook(request, bot_id=None):
                                                 if groq_result:
                                                     summary = groq_result.get("summary", "")
                                                     action_items = groq_result.get("action_items", [])
+                                                    meeting_gaps = groq_result.get("meeting_gaps") or []
+                                                    open_questions = groq_result.get("open_questions") or []
                                                     
                                                     print(f'[bot-wh] [BACKGROUND] ✓ Generated summary ({len(summary)} chars) and {len(action_items)} action items')
                                                     
-                                                    # Step 4: Generate contextual nudges and impact score
-                                                    print(f'[bot-wh] [BACKGROUND] Step 4: Generating contextual nudges and impact score with Groq...')
+                                                    transcript_data = existing_transcription.transcript_data.copy() if existing_transcription.transcript_data else {}
+                                                    existing_transcription.impact_score = None
+                                                    transcript_data.pop('impact_breakdown', None)
+                                                    
+                                                    # Step 4: Generate contextual nudges and key outcomes/signals
+                                                    print(f'[bot-wh] [BACKGROUND] Step 4: Generating contextual nudges and key outcomes/signals with Groq...')
                                                     try:
-                                                        from app.services.groq.nudge_analyzer import generate_contextual_nudges_and_impact_score_with_groq
+                                                        from app.services.groq.nudge_analyzer import generate_contextual_nudges_and_signals_with_groq
                                                         from app.models import MeetingTranscription
                                                         
                                                         # Get previous meetings for context (last 5 meetings for this user)
@@ -1018,7 +1032,7 @@ def bot_webhook(request, bot_id=None):
                                                                 if t.summary
                                                             ]
                                                         
-                                                        nudge_result = generate_contextual_nudges_and_impact_score_with_groq(
+                                                        nudge_result = generate_contextual_nudges_and_signals_with_groq(
                                                             transcript_text=transcript_text,
                                                             summary=summary,
                                                             action_items=action_items,
@@ -1027,31 +1041,26 @@ def bot_webhook(request, bot_id=None):
                                                         
                                                         if nudge_result:
                                                             contextual_nudges = nudge_result.get("contextual_nudges", [])
-                                                            impact_score = nudge_result.get("impact_score")
-                                                            impact_breakdown = nudge_result.get("impact_breakdown", {})
+                                                            key_outcomes_signals = nudge_result.get("key_outcomes_signals") or []
                                                             
-                                                            print(f'[bot-wh] [BACKGROUND] ✓ Generated {len(contextual_nudges)} contextual nudges and impact score: {impact_score}')
+                                                            print(f'[bot-wh] [BACKGROUND] ✓ Generated {len(contextual_nudges)} contextual nudges and {len(key_outcomes_signals)} key outcome signals')
                                                             
-                                                            # Update transcription record with nudges and impact score
                                                             existing_transcription.contextual_nudges = contextual_nudges
-                                                            existing_transcription.impact_score = impact_score
-                                                            
-                                                            # Store impact breakdown in transcript_data
-                                                            transcript_data['impact_breakdown'] = impact_breakdown
+                                                            existing_transcription.key_outcomes_signals = key_outcomes_signals
                                                         else:
-                                                            print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: Failed to generate contextual nudges/impact score')
+                                                            print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: Failed to generate contextual nudges/signals')
                                                     except Exception as nudge_error:
                                                         print(f'[bot-wh] [BACKGROUND] ⚠ WARNING: Error generating nudges: {nudge_error}')
                                                         import traceback
                                                         traceback.print_exc()
                                                     
-                                                    # Update transcription record
-                                                    transcript_data = existing_transcription.transcript_data.copy() if existing_transcription.transcript_data else {}
                                                     transcript_data['summary'] = summary
                                                     transcript_data['action_items'] = action_items
                                                     
                                                     existing_transcription.summary = summary
                                                     existing_transcription.action_items = action_items
+                                                    existing_transcription.meeting_gaps = meeting_gaps
+                                                    existing_transcription.open_questions = open_questions
                                                     existing_transcription.status = 'completed'
                                                     existing_transcription.transcript_data = transcript_data
                                                     existing_transcription.save()
@@ -1059,7 +1068,7 @@ def bot_webhook(request, bot_id=None):
                                                     # BotRecording.status is already updated at the beginning of bot.done handler
                                                     # So we don't need to update it again here
                                                     
-                                                    print(f'[bot-wh] [BACKGROUND] ✓ Saved transcription with summary, action items, nudges, and impact score')
+                                                    print(f'[bot-wh] [BACKGROUND] ✓ Saved transcription with summary, action items, nudges, gaps, and open questions')
                                                     print(f'[bot-wh] [BACKGROUND] ==========================================')
                                                     print(f'[bot-wh] [BACKGROUND] ✅ TRANSCRIPTION PROCESSING COMPLETE (via bot.done)')
                                                     print(f'[bot-wh] [BACKGROUND] ==========================================')
@@ -1166,6 +1175,10 @@ def bot_webhook(request, bot_id=None):
                                                             assemblyai_transcript["summary"] = groq_result.get("summary")
                                                         if groq_result.get("action_items"):
                                                             assemblyai_transcript["action_items"] = groq_result.get("action_items")
+                                                        if groq_result.get("meeting_gaps") is not None:
+                                                            assemblyai_transcript["meeting_gaps"] = groq_result.get("meeting_gaps")
+                                                        if groq_result.get("open_questions") is not None:
+                                                            assemblyai_transcript["open_questions"] = groq_result.get("open_questions")
                                                         print(f'[bot-wh] ✓ Generated summary and action items using Groq')
                                                     else:
                                                         print(f'[bot-wh] ⚠ WARNING: Failed to generate summary/action_items with Groq')
@@ -1220,6 +1233,12 @@ def bot_webhook(request, bot_id=None):
                                                         transcription.transcript_text = assemblyai_transcript.get('text', '') or transcription.transcript_text
                                                     transcription.summary = assemblyai_transcript.get('summary', '') or transcription.summary
                                                     transcription.action_items = action_items or transcription.action_items
+                                                    mg = assemblyai_transcript.get('meeting_gaps')
+                                                    oq = assemblyai_transcript.get('open_questions')
+                                                    if mg is not None:
+                                                        transcription.meeting_gaps = mg
+                                                    if oq is not None:
+                                                        transcription.open_questions = oq
                                                     transcription.status = 'completed' if assemblyai_transcript.get('status') == 'completed' else 'processing'
                                                     
                                                     # Update workspace_id and folder_id if not set

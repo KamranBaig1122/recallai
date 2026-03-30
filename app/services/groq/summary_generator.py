@@ -1,233 +1,222 @@
 """
-Service to generate summary and action items from transcript using Groq API
+Service to generate meeting intelligence from transcript using Groq API:
+what changed, structured action items, gaps, and open questions.
 """
+import json
 import os
 import requests
-import json
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
+
+def _normalize_action_items(raw: Any) -> List[Dict[str, Any]]:
+    if not raw or not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            out.append({
+                "text": item.strip(),
+                "owner": None,
+                "deadline": None,
+                "clarity": "clear",
+                "blockers": None,
+            })
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = (
+            item.get("text")
+            or item.get("action")
+            or item.get("item")
+            or ""
+        )
+        if isinstance(text, str):
+            text = text.strip()
+        else:
+            text = str(text).strip()
+        if not text:
+            continue
+        owner = item.get("owner") or item.get("assignee") or item.get("responsible") or item.get("speaker")
+        if owner is not None and not isinstance(owner, str):
+            owner = str(owner)
+        deadline = item.get("deadline")
+        if deadline is not None and not isinstance(deadline, str):
+            deadline = str(deadline)
+        clarity_raw = item.get("clarity") or item.get("status")
+        if isinstance(clarity_raw, str) and clarity_raw.lower() in ("clear", "vague"):
+            clarity = clarity_raw.lower()
+        else:
+            clarity = "vague" if item.get("vague") else "clear"
+        blockers = item.get("blockers") or item.get("blocker")
+        if blockers is not None and not isinstance(blockers, str):
+            blockers = str(blockers)
+        out.append({
+            "text": text,
+            "owner": owner.strip() if isinstance(owner, str) and owner.strip() else None,
+            "deadline": deadline.strip() if isinstance(deadline, str) and deadline.strip() else None,
+            "clarity": clarity,
+            "blockers": blockers.strip() if isinstance(blockers, str) and blockers.strip() else None,
+        })
+    return out
+
+
+def _normalize_string_list(raw: Any, max_items: int = 25) -> List[str]:
+    if not raw:
+        return []
+    if isinstance(raw, str) and raw.strip():
+        return [raw.strip()][:max_items]
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for x in raw[:max_items]:
+        if isinstance(x, str) and x.strip():
+            out.append(x.strip())
+        elif x is not None:
+            s = str(x).strip()
+            if s:
+                out.append(s)
+    return out
+
+
+def _parse_groq_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    summary = (parsed.get("summary") or "").strip()
+    action_items = _normalize_action_items(parsed.get("action_items"))
+    gaps = _normalize_string_list(parsed.get("gaps_identified") or parsed.get("meeting_gaps"))
+    open_q = _normalize_string_list(parsed.get("open_questions") or parsed.get("still_unclear"))
+    return {
+        "summary": summary,
+        "action_items": action_items,
+        "meeting_gaps": gaps,
+        "open_questions": open_q,
+    }
 
 
 def generate_summary_and_action_items_with_groq(transcript_text: str) -> Optional[Dict[str, Any]]:
     """
-    Generate summary and action items from transcript text using Groq API
-    
-    Args:
-        transcript_text: The transcript text from the meeting
-        
+    Generate decision/impact summary, execution-style action items, gaps, and open questions.
+
     Returns:
-        Dict with summary and action_items, or None if failed
+        Dict with summary, action_items, meeting_gaps, open_questions; or None if failed
     """
-    api_key = os.getenv('GROQ_API_KEY', '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')
-    
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+
     if not api_key:
-        print('[Groq] ⚠ WARNING: GROQ_API_KEY not set')
+        print("[Groq] ⚠ WARNING: GROQ_API_KEY not set")
         return None
-    
+
     if not transcript_text or len(transcript_text.strip()) < 10:
-        print('[Groq] ⚠ WARNING: Transcript text is too short or empty')
+        print("[Groq] ⚠ WARNING: Transcript text is too short or empty")
         return None
-    
+
     endpoint = "https://api.groq.com/openai/v1/chat/completions"
-    
+
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
+        "Authorization": f"Bearer {api_key}",
     }
-    
-    # Enhanced prompt for accurate summary and action items with participant names
-    prompt = f"""You are an expert meeting analyst. Analyze the COMPLETE meeting transcript below and generate a comprehensive summary and action items.
 
-INSTRUCTIONS:
-1. Read the ENTIRE transcript carefully from start to finish
-2. Identify all participants by their names as they appear in the transcript
-3. Create a detailed, chronological summary that captures:
-   - Key topics discussed
-   - Important decisions made
-   - Main points raised by each participant (use their actual names)
-   - Outcomes and conclusions
-   - Any deadlines or timelines mentioned
-4. Extract ALL action items with:
-   - The specific task or deliverable
-   - Who is responsible (use participant names)
-   - Any deadlines or timelines mentioned
-   - Context about why the action item is needed
+    prompt = f"""You are an expert meeting analyst. Read the COMPLETE transcript and produce structured intelligence for someone who did NOT attend. They need immediate clarity: what changed, what is blocked, what needs action — not a chronological play-by-play.
 
-REQUIREMENTS:
-- Be thorough and accurate - don't miss important details
-- Include participant names in the summary when relevant
-- For action items, always include the responsible person's name if mentioned
-- Maintain chronological flow in the summary
-- Capture nuances and context, not just surface-level information
-- If an action item has a deadline, include it in the text
+OUTPUT RULES:
+1. "summary" — 2–5 short paragraphs titled in spirit "what changed": decisions made, impact on timeline/scope/delivery, ownership where clear, and what remains at risk. Do NOT narrate the meeting minute-by-minute.
 
-Format your response as VALID JSON only (no markdown, no code blocks, no explanations):
+2. "action_items" — every commitment or task. For EACH item include:
+   - "text": the task in one line
+   - "owner": person/role if mentioned, else null
+   - "deadline": explicit date/time if mentioned; if none say null (do not invent dates)
+   - "clarity": "clear" or "vague" (vague = missing owner, deadline, or scope)
+   - "blockers": dependency or blocker if mentioned, else null
+
+3. "gaps_identified" — bullet strings: missing owners, missing deadlines, contradictions (e.g. timeline 2 vs 3 weeks), unassigned dependencies, undefined next steps. Empty list if none.
+
+4. "open_questions" — bullet strings: questions left unanswered or ambiguous. Empty list if none.
+
+Respond with VALID JSON only (no markdown fences):
 {{
-  "summary": "A comprehensive, detailed summary of the meeting that includes participant names, key discussions, decisions, and outcomes. Write in clear paragraphs covering the entire meeting chronologically.",
+  "summary": "…",
   "action_items": [
-    {{"text": "Complete action item description with responsible person name and deadline if mentioned"}},
-    {{"text": "Another action item with full context"}}
-  ]
+    {{
+      "text": "…",
+      "owner": "… or null",
+      "deadline": "… or null",
+      "clarity": "clear",
+      "blockers": "… or null"
+    }}
+  ],
+  "gaps_identified": ["…"],
+  "open_questions": ["…"]
 }}
 
-Meeting Transcript (COMPLETE - analyze all of it):
+Meeting transcript:
 {transcript_text}"""
-    
+
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
             {
                 "role": "system",
-                "content": "You are a professional meeting analyst. Your task is to analyze meeting transcripts and extract comprehensive summaries and action items. Always be thorough, accurate, and include participant names when relevant."
+                "content": "You extract decision-focused meeting intelligence and return only valid JSON.",
             },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "user", "content": prompt},
         ],
-        "temperature": 0.2,  # Lower temperature for more accurate and consistent results
-        "max_tokens": 4000  # Increased for longer, more detailed summaries
+        "temperature": 0.2,
+        "max_tokens": 4000,
     }
-    
+
+    content = ""
     try:
-        # Calculate transcript size in tokens (rough estimate: 1 token ≈ 4 characters)
         estimated_tokens = len(transcript_text) // 4
-        estimated_total_tokens = estimated_tokens + 1000  # Add prompt tokens
-        
-        print(f'[Groq] ==========================================')
-        print(f'[Groq] 🤖 GENERATING SUMMARY & ACTION ITEMS')
-        print(f'[Groq] Model: llama-3.3-70b-versatile (128K context window)')
-        print(f'[Groq] Full transcript length: {len(transcript_text):,} chars')
-        print(f'[Groq] Estimated tokens: ~{estimated_tokens:,} (input)')
-        print(f'[Groq] Total estimated: ~{estimated_total_tokens:,} tokens')
-        print(f'[Groq] ✅ Sending COMPLETE transcript (no truncation)')
-        print(f'[Groq] ==========================================')
-        
-        # Increased timeout for longer transcripts
-        timeout_seconds = max(60, len(transcript_text) // 1000)  # At least 60s, more for longer transcripts
+        print("[Groq] ==========================================")
+        print("[Groq] 🤖 GENERATING MEETING INTELLIGENCE (summary, actions, gaps, questions)")
+        print(f"[Groq] Transcript length: {len(transcript_text):,} chars (~{estimated_tokens} tokens input)")
+        print("[Groq] ==========================================")
+
+        timeout_seconds = max(60, len(transcript_text) // 1000)
         response = requests.post(endpoint, json=payload, headers=headers, timeout=timeout_seconds)
         response.raise_for_status()
-        
+
         result = response.json()
-        
-        # Extract the content from the response
-        choices = result.get('choices', [])
+        choices = result.get("choices", [])
         if not choices:
-            print(f'[Groq] ❌ ERROR: No choices in response')
+            print("[Groq] ❌ ERROR: No choices in response")
             return None
-        
-        content = choices[0].get('message', {}).get('content', '')
-        
+
+        content = choices[0].get("message", {}).get("content", "") or ""
         if not content:
-            print(f'[Groq] ❌ ERROR: No content in response')
+            print("[Groq] ❌ ERROR: No content in response")
             return None
-        
-        print(f'[Groq] ✅ Received response from Groq')
-        print(f'[Groq] Response length: {len(content)} chars')
-        
-        # Try to parse JSON from response
-        try:
-            # Extract JSON from response text (might be wrapped in markdown code blocks)
-            json_str = content.strip()
-            
-            # Remove markdown code blocks if present
-            if json_str.startswith('```'):
-                # Find the first { and last }
-                json_start = json_str.find('{')
-                json_end = json_str.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = json_str[json_start:json_end]
-            
-            parsed = json.loads(json_str)
-            
-            summary = parsed.get('summary', '').strip()
-            action_items = parsed.get('action_items', [])
-            
-            # Ensure action_items is a list of dicts with proper formatting
-            if action_items and isinstance(action_items, list):
-                formatted_action_items = []
-                for item in action_items:
-                    if isinstance(item, dict):
-                        # Extract text - include speaker name in text if available
-                        text = item.get('text', item.get('action', item.get('item', str(item)))).strip()
-                        # If speaker/responsible person is separate, append to text
-                        speaker = item.get('speaker') or item.get('responsible') or item.get('assignee') or item.get('owner')
-                        if speaker and speaker.strip() and speaker.strip() not in text:
-                            text = f"{text} (Responsible: {speaker.strip()})"
-                        if text:  # Only add non-empty action items
-                            formatted_action_items.append({"text": text})
-                    elif isinstance(item, str) and item.strip():
-                        formatted_action_items.append({"text": item.strip()})
-                
-                action_items = formatted_action_items
-            
-            print(f'[Groq] ✅ Parsed summary and action items')
-            print(f'[Groq] Summary length: {len(summary)} chars')
-            print(f'[Groq] Action items: {len(action_items)} items')
-            print(f'[Groq] ==========================================')
-            
-            return {
-                "summary": summary,
-                "action_items": action_items
-            }
-            
-        except json.JSONDecodeError as e:
-            print(f'[Groq] ⚠ WARNING: Could not parse JSON from response')
-            print(f'[Groq] Response content: {content[:500]}...')
-            print(f'[Groq] Error: {e}')
-            
-            # Fallback: Try to extract summary and action items manually
-            # Look for "summary" and "action_items" in the text
-            summary = ""
-            action_items = []
-            
-            # Try to find summary section
-            if '"summary"' in content.lower() or 'summary' in content.lower():
-                # Extract text after "summary"
-                summary_match = content.lower().find('summary')
-                if summary_match >= 0:
-                    # Get text after summary keyword
-                    summary_text = content[summary_match + 7:summary_match + 500]
-                    # Clean up
-                    summary = summary_text.split('"')[1] if '"' in summary_text else summary_text.split('\n')[0]
-                    summary = summary.strip()
-            
-            # Try to find action items
-            if '"action_items"' in content.lower() or 'action items' in content.lower():
-                # Look for list items
-                lines = content.split('\n')
-                in_action_items = False
-                for line in lines:
-                    if 'action' in line.lower() and 'item' in line.lower():
-                        in_action_items = True
-                        continue
-                    if in_action_items and (line.strip().startswith('-') or line.strip().startswith('*') or line.strip().startswith('1.')):
-                        action_text = line.strip().lstrip('-*0123456789. ').strip()
-                        if action_text:
-                            action_items.append({"text": action_text})
-            
-            # If we couldn't extract, use the full content as summary
-            if not summary:
-                summary = content[:1000]  # Limit summary length
-            
-            print(f'[Groq] ⚠ Using fallback extraction')
-            print(f'[Groq] Summary length: {len(summary)} chars')
-            print(f'[Groq] Action items: {len(action_items)} items')
-            print(f'[Groq] ==========================================')
-            
-            return {
-                "summary": summary,
-                "action_items": action_items
-            }
-            
+
+        json_str = content.strip()
+        if json_str.startswith("```"):
+            json_start = json_str.find("{")
+            json_end = json_str.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                json_str = json_str[json_start:json_end]
+
+        parsed = json.loads(json_str)
+        if not isinstance(parsed, dict):
+            return None
+
+        normalized = _parse_groq_payload(parsed)
+        print(f"[Groq] ✅ Summary length: {len(normalized['summary'])} chars; "
+              f"actions: {len(normalized['action_items'])}; "
+              f"gaps: {len(normalized['meeting_gaps'])}; "
+              f"open_questions: {len(normalized['open_questions'])}")
+        print("[Groq] ==========================================")
+        return normalized
+
+    except json.JSONDecodeError as e:
+        print(f"[Groq] ⚠ WARNING: Could not parse JSON: {e}")
+        print(f"[Groq] Content preview: {content[:500]}...")
+        return None
     except requests.exceptions.RequestException as e:
-        print(f'[Groq] ❌ ERROR: Failed to generate summary: {e}')
-        if hasattr(e, 'response') and e.response is not None:
-            print(f'[Groq] Response status: {e.response.status_code}')
-            print(f'[Groq] Response body: {e.response.text[:500]}')
+        print(f"[Groq] ❌ ERROR: Failed to generate summary: {e}")
+        if hasattr(e, "response") and e.response is not None:
+            print(f"[Groq] Response status: {e.response.status_code}")
+            print(f"[Groq] Response body: {e.response.text[:500]}")
         return None
     except Exception as e:
-        print(f'[Groq] ❌ ERROR: Unexpected error: {e}')
+        print(f"[Groq] ❌ ERROR: Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         return None
-
