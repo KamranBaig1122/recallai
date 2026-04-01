@@ -145,7 +145,7 @@ def api_folder_meetings_overview(request, folder_id):
     if groq_result is None:
         r = JsonResponse(
             {
-                'error': 'Unable to generate overview. Check GROQ_API_KEY and try again.',
+                'error': 'Unable to generate overview: GROQ_API_KEY is not configured.',
                 'meetings_count': len(transcriptions),
             },
             status=502,
