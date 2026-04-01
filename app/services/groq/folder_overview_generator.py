@@ -170,12 +170,12 @@ def generate_folder_meetings_overview_with_groq(meetings_bundle: List[Dict[str, 
 Below is structured data from each meeting (title, date, per-meeting summary, and per-meeting action items).
 
 Your tasks:
-1. Write ONE cohesive executive summary (2–6 short paragraphs) covering the whole relationship across these meetings: themes, decisions, progress, risks. Do not paste each meeting summary separately — synthesize.
+1. Write a cohesive executive overview as 4–8 distinct bullet-style points (themes, decisions, progress, risks). Do not paste each meeting summary separately — synthesize. In the JSON string, separate each point with \\n\\n (double newline) so the UI can show bullets.
 2. Produce a merged list of action items: deduplicate near-duplicates, keep important specifics, and attribute each item to the most relevant meeting title in "meeting_title".
 
 Respond with VALID JSON only (no markdown fences):
 {{
-  "summary": "single synthesized overview as plain text, paragraphs separated by blank lines if needed",
+  "summary": "point one\\n\\npoint two\\n\\npoint three — plain text only, points separated by \\n\\n",
   "action_items": [
     {{"text": "clear action", "meeting_title": "Meeting title this relates to"}}
   ]
