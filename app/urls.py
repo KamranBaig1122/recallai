@@ -1,7 +1,7 @@
 from django.urls import path
 from app.views import root, auth, oauth, calendar, calendar_event, webhooks, calendar_api, transcription_api, user_api, chat_api, notification_api
 import app.views.bot_webhooks as bot_webhooks
-from app.views import static_files, bot_recordings, recordings_list, contextual_nudges_api, folder_meetings_overview_api
+from app.views import static_files, bot_recordings, recordings_list, contextual_nudges_api, folder_meetings_overview_api, workspace_folder_insights_api
 
 urlpatterns = [
     # Root
@@ -39,6 +39,11 @@ urlpatterns = [
         'api/folders/<uuid:folder_id>/meetings-overview',
         folder_meetings_overview_api.api_folder_meetings_overview,
         name='api-folder-meetings-overview',
+    ),
+    path(
+        'api/folders/<uuid:folder_id>/workspace-insights',
+        workspace_folder_insights_api.api_folder_workspace_insights,
+        name='api-folder-workspace-insights',
     ),
     path('api/user/recordings', user_api.api_user_recordings, name='api-user-recordings'),
     path('api/user/<uuid:user_id>/delete-all-data', calendar_api.api_delete_user_data, name='api-delete-user-data'),
