@@ -150,6 +150,8 @@ def compute_workspace_folder_insights(transcriptions: List[MeetingTranscription]
     action_rows: List[Dict[str, Any]] = []
     missing_owner_count = 0
     missing_deadline_count = 0
+    missing_owner_meetings: Set[str] = set()
+    missing_deadline_meetings: Set[str] = set()
 
     for t in transcriptions:
         mid = str(t.id)
@@ -173,8 +175,10 @@ def compute_workspace_folder_insights(transcriptions: List[MeetingTranscription]
             deadline_missing = _absent(deadline_raw)
             if owner_missing:
                 missing_owner_count += 1
+                missing_owner_meetings.add(mid)
             if deadline_missing:
                 missing_deadline_count += 1
+                missing_deadline_meetings.add(mid)
 
             blocked = not _absent(blockers_raw)
             flags: List[str] = []
@@ -324,6 +328,23 @@ def compute_workspace_folder_insights(transcriptions: List[MeetingTranscription]
         repeated_issues.append(sample[:200])
         if len(repeated_issues) >= 4:
             break
+
+    if len(repeated_issues) < 4:
+        if len(missing_owner_meetings) >= 2 and "🔁 Tasks repeatedly missing ownership" not in repeated_issues:
+            repeated_issues.append("🔁 Tasks repeatedly missing ownership")
+        if len(missing_deadline_meetings) >= 2 and "🔁 Deadlines consistently not defined" not in repeated_issues:
+            repeated_issues.append("🔁 Deadlines consistently not defined")
+
+    dependency_repeat = sum(1 for _, _, g in gaps_with_meeting if _gap_theme_icon_and_label(g)[1] == "dependency")
+    approval_repeat = sum(1 for _, _, g in gaps_with_meeting if _gap_theme_icon_and_label(g)[1] == "approval")
+    deadline_theme_repeat = sum(1 for _, _, g in gaps_with_meeting if _gap_theme_icon_and_label(g)[1] == "deadline_pressure")
+
+    if len(repeated_issues) < 4 and deadline_theme_repeat >= 2:
+        repeated_issues.append("🔁 Timeline clarity issues across meetings")
+    if len(repeated_issues) < 4 and approval_repeat >= 2:
+        repeated_issues.append("🔁 Approval or dependency gaps recurring")
+    if len(repeated_issues) < 4 and dependency_repeat >= 2 and "🔁 Approval or dependency gaps recurring" not in repeated_issues:
+        repeated_issues.append("🔁 Approval or dependency gaps recurring")
 
     action_rows.sort(key=lambda r: r["_sort"])
     for r in action_rows:
