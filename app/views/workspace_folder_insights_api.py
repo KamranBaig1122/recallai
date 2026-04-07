@@ -45,6 +45,11 @@ def api_folder_workspace_insights(request, folder_id):
         r = JsonResponse({"error": str(e)}, status=500)
         return add_cors_headers(r, request)
 
-    payload = compute_workspace_folder_insights(transcriptions)
+    try:
+        payload = compute_workspace_folder_insights(transcriptions)
+    except Exception as e:
+        r = JsonResponse({"error": f"Failed to compute insights: {str(e)}"}, status=500)
+        return add_cors_headers(r, request)
+    
     r = JsonResponse(payload)
     return add_cors_headers(r, request)

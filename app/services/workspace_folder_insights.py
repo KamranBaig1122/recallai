@@ -222,12 +222,6 @@ def compute_workspace_folder_insights(transcriptions: List[MeetingTranscription]
 
     # --- Reasons (max 3) ---
     reasons: List[str] = []
-    
-    # Add insight sentence if there are signs of stalled execution
-    repeated_count = len([r for r in repeated_issues if r.startswith("🔁")])
-    if (critical_any or repeated_count >= 2 or (missing_owner_count + missing_deadline_count) >= 3) and status != "on_track":
-        reasons.append("The project is showing signs of stalled execution, with key issues persisting across multiple meetings without resolution.")
-    
     if critical_any:
         crit_sample = next((g for _, _, g in gaps_with_meeting if _is_critical_gap(g)), None)
         if crit_sample and len(crit_sample) > 90:
@@ -243,7 +237,6 @@ def compute_workspace_folder_insights(transcriptions: List[MeetingTranscription]
         )
     if not reasons and status != "on_track":
         reasons.append("Execution details still need tightening across meetings.")
-    reasons = reasons[:3]
 
     # --- Aggregated gaps (max 5), prioritized ---
     gap_lines: List[Dict[str, Any]] = []
@@ -351,6 +344,13 @@ def compute_workspace_folder_insights(transcriptions: List[MeetingTranscription]
         repeated_issues.append("🔁 Approval or dependency gaps recurring")
     if len(repeated_issues) < 4 and dependency_repeat >= 2 and "🔁 Approval or dependency gaps recurring" not in repeated_issues:
         repeated_issues.append("🔁 Approval or dependency gaps recurring")
+
+    # --- Add insight sentence if there are signs of stalled execution ---
+    repeated_count = len([r for r in repeated_issues if r.startswith("🔁")])
+    if (critical_any or repeated_count >= 2 or (missing_owner_count + missing_deadline_count) >= 3) and status != "on_track":
+        # Insert at beginning of reasons for visibility
+        reasons.insert(0, "The project is showing signs of stalled execution, with key issues persisting across multiple meetings without resolution.")
+    reasons = reasons[:3]
 
     action_rows.sort(key=lambda r: r["_sort"])
     for r in action_rows:
