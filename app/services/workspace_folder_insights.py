@@ -222,16 +222,22 @@ def compute_workspace_folder_insights(transcriptions: List[MeetingTranscription]
 
     # --- Reasons (max 3) ---
     reasons: List[str] = []
+    
+    # Add insight sentence if there are signs of stalled execution
+    repeated_count = len([r for r in repeated_issues if r.startswith("🔁")])
+    if (critical_any or repeated_count >= 2 or (missing_owner_count + missing_deadline_count) >= 3) and status != "on_track":
+        reasons.append("The project is showing signs of stalled execution, with key issues persisting across multiple meetings without resolution.")
+    
     if critical_any:
         crit_sample = next((g for _, _, g in gaps_with_meeting if _is_critical_gap(g)), None)
         if crit_sample and len(crit_sample) > 90:
             crit_sample = crit_sample[:87] + "…"
         reasons.append(crit_sample or "Critical dependency or risk called out in meeting gaps.")
-    if missing_owner_count >= 1 and len(reasons) < 3:
+    if missing_owner_count >= 1 and len(reasons) < 4:
         reasons.append(
             f"{missing_owner_count} action item{'s' if missing_owner_count != 1 else ''} without an owner."
         )
-    if missing_deadline_count >= 1 and len(reasons) < 3:
+    if missing_deadline_count >= 1 and len(reasons) < 4:
         reasons.append(
             f"{missing_deadline_count} action item{'s' if missing_deadline_count != 1 else ''} missing a deadline."
         )
@@ -330,10 +336,10 @@ def compute_workspace_folder_insights(transcriptions: List[MeetingTranscription]
             break
 
     if len(repeated_issues) < 4:
-        if len(missing_owner_meetings) >= 2 and "🔁 Tasks repeatedly missing ownership" not in repeated_issues:
-            repeated_issues.append("🔁 Tasks repeatedly missing ownership")
-        if len(missing_deadline_meetings) >= 2 and "🔁 Deadlines consistently not defined" not in repeated_issues:
-            repeated_issues.append("🔁 Deadlines consistently not defined")
+        if len(missing_owner_meetings) >= 2 and "🔁 Tasks missing ownership across recent meetings" not in repeated_issues:
+            repeated_issues.append("🔁 Tasks missing ownership across recent meetings")
+        if len(missing_deadline_meetings) >= 2 and "🔁 Deadlines have not been defined despite being discussed multiple times" not in repeated_issues:
+            repeated_issues.append("🔁 Deadlines have not been defined despite being discussed multiple times")
 
     dependency_repeat = sum(1 for _, _, g in gaps_with_meeting if _gap_theme_icon_and_label(g)[1] == "dependency")
     approval_repeat = sum(1 for _, _, g in gaps_with_meeting if _gap_theme_icon_and_label(g)[1] == "approval")
@@ -358,6 +364,13 @@ def compute_workspace_folder_insights(transcriptions: List[MeetingTranscription]
         repeated_issues=repeated_issues,
         critical_any=critical_any,
     )
+    
+    # Add progress/execution line if needed
+    attention_count = len([r for r in action_rows if r["flags"]])
+    if attention_count >= 3 or len(repeated_issues) >= 2:
+        progress_line = f"Progress: No meaningful progress across last {len(transcriptions)} meetings"
+        if progress_line not in short_bullets:
+            short_bullets.insert(0, progress_line)
 
     return {
         "status": status,
